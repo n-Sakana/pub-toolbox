@@ -1,8 +1,9 @@
 @echo off
+chcp 65001 >nul
 setlocal
 if "%~1"=="" (
-    echo ファイルをこの BAT にドラッグ＆ドロップしてください。
-    echo 対応形式: .xls / .xlsm / .xlam
+    echo Drop a file onto this BAT to remove VBA password.
+    echo Supported: .xls / .xlsm / .xlam
     pause
     exit /b 1
 )
