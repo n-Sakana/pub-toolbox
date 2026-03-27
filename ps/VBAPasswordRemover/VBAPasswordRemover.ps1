@@ -5,21 +5,21 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path $FilePath)) {
-    Write-Host "エラー: ファイルが見つかりません: $FilePath" -ForegroundColor Red
+    Write-Host "Error: file not found: $FilePath" -ForegroundColor Red
     exit 1
 }
 
 $ext = [IO.Path]::GetExtension($FilePath).ToLower()
 if ($ext -notin '.xls', '.xlsm', '.xlam') {
-    Write-Host "エラー: 対応していない形式です: $ext" -ForegroundColor Red
-    Write-Host "対応形式: .xls / .xlsm / .xlam"
+    Write-Host "Error: unsupported format: $ext" -ForegroundColor Red
+    Write-Host "Supported: .xls / .xlsm / .xlam"
     exit 1
 }
 
-# バックアップ作成
+# Backup
 $bakPath = "$FilePath.bak"
 Copy-Item $FilePath $bakPath -Force
-Write-Host "バックアップ作成: $bakPath"
+Write-Host "Backup created: $bakPath"
 
 function Find-DPB([byte[]]$data) {
     $pattern = [System.Text.Encoding]::ASCII.GetBytes('DPB=')
@@ -50,22 +50,18 @@ function Remove-PasswordOoxml([string]$path) {
     New-Item $tempDir -ItemType Directory -Force | Out-Null
 
     try {
-        # ZIP 展開
         $extractDir = Join-Path $tempDir 'extracted'
         [IO.Compression.ZipFile]::ExtractToDirectory($path, $extractDir)
 
-        # vbaProject.bin を検索
         $vbaProj = Get-ChildItem $extractDir -Recurse -Filter 'vbaProject.bin' | Select-Object -First 1
         if (-not $vbaProj) { return $false }
 
-        # DPB= を書き換え
         $data = [IO.File]::ReadAllBytes($vbaProj.FullName)
         $pos = Find-DPB $data
         if ($pos -eq -1) { return $false }
         $data[$pos + 2] = 0x78
         [IO.File]::WriteAllBytes($vbaProj.FullName, $data)
 
-        # 再 ZIP 化
         Remove-Item $path -Force
         [IO.Compression.ZipFile]::CreateFromDirectory($extractDir, $path)
         return $true
@@ -75,8 +71,7 @@ function Remove-PasswordOoxml([string]$path) {
     }
 }
 
-# 実行
-Write-Host "処理中: $FilePath"
+Write-Host "Processing: $FilePath"
 
 $result = if ($ext -eq '.xls') {
     Remove-PasswordXls $FilePath
@@ -86,16 +81,15 @@ $result = if ($ext -eq '.xls') {
 
 if ($result) {
     Write-Host ""
-    Write-Host "パスワード保護を無効化しました。" -ForegroundColor Green
+    Write-Host "VBA password protection disabled." -ForegroundColor Green
     Write-Host ""
-    Write-Host "次の手順で完全に解除してください:"
-    Write-Host "  1. 対象ファイルを開く"
-    Write-Host "  2. VBE (Alt+F11) を開く"
-    Write-Host "  3. ツール > VBAProject のプロパティ > 保護タブ"
-    Write-Host "  4. パスワード欄を空にして OK"
-    Write-Host "  5. ファイルを保存"
+    Write-Host "To fully remove, open the file and:"
+    Write-Host "  1. Open VBE (Alt+F11)"
+    Write-Host "  2. Tools > VBAProject Properties > Protection tab"
+    Write-Host "  3. Clear the password fields and click OK"
+    Write-Host "  4. Save the file"
 } else {
     Write-Host ""
-    Write-Host "VBAプロジェクトのパスワード情報が見つかりませんでした。" -ForegroundColor Yellow
-    Write-Host "ファイルにVBAプロジェクトが含まれていない可能性があります。"
+    Write-Host "No VBA password hash (DPB=) found in this file." -ForegroundColor Yellow
+    Write-Host "The file may not contain a VBA project."
 }
