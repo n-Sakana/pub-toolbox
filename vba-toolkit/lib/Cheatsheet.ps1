@@ -19,8 +19,7 @@ $replacements = [ordered]@{
     # --- Timer / Sleep ---
     'GetTickCount' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
-        Alt = 'Timer (VBA built-in)'
+        Alt = 'Timer (VBA built-in, Single type)'
         Example = @'
 ' Before:
 Dim t As Long: t = GetTickCount()
@@ -28,47 +27,49 @@ DoSomething
 Debug.Print "Elapsed: " & (GetTickCount() - t) & " ms"
 
 ' After:
-Dim t As Double: t = Timer
+Dim t As Single: t = Timer
 DoSomething
-Debug.Print "Elapsed: " & Format((Timer - t) * 1000, "0") & " ms"
+Dim elapsed As Single: elapsed = Timer - t
+If elapsed < 0 Then elapsed = elapsed + 86400  ' midnight rollover
+Debug.Print "Elapsed: " & Format(elapsed * 1000, "0") & " ms"
 '@
-        Note = 'Timer returns seconds as Double (midnight reset). For short measurements this is sufficient.'
+        Note = 'Timer is Single (~15ms resolution), resets at midnight. Add 86400 if elapsed < 0. GetTickCount wraps at ~49.7 days.'
     }
     'GetTickCount64' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
         Alt = 'Timer (VBA built-in)'
         Example = '(Same as GetTickCount)'
         Note = ''
     }
     'Sleep' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
-        Alt = 'Application.Wait or DoEvents loop'
+        Alt = 'Application.Wait (Excel only) or DoEvents loop'
         Example = @'
 ' Before:
 Sleep 1000  ' 1 second
 
-' After (Option A - simple):
+' After (Option A - Excel only, 1sec resolution):
 Application.Wait Now + TimeSerial(0, 0, 1)
 
-' After (Option B - sub-second, non-blocking):
-Dim endTime As Double: endTime = Timer + 0.5  ' 500ms
+' After (Option B - any host, sub-second, busy-wait):
+Dim endTime As Single: endTime = Timer + 0.5  ' 500ms
 Do While Timer < endTime: DoEvents: Loop
+' Note: DoEvents loop uses 100% CPU on one core
+
+' After (Option C - non-blocking delayed execution):
+Application.OnTime Now + TimeSerial(0, 0, 1), "MyCallback"
 '@
-        Note = 'Application.Wait has 1-second resolution. Use DoEvents loop for sub-second or non-blocking waits.'
+        Note = 'Application.Wait is Excel-only (not Word/Access/Outlook). DoEvents loop is a busy-wait. Application.OnTime is non-blocking but requires a callback Sub.'
     }
     'timeGetTime' = @{
         Lib = 'winmm'
-        Risk = 'LOW'
         Alt = 'Timer (VBA built-in)'
         Example = '(Same as GetTickCount)'
         Note = ''
     }
     'QueryPerformanceCounter' = @{
         Lib = 'kernel32'
-        Risk = 'MEDIUM'
-        Alt = 'Timer (lower precision but usually sufficient)'
+        Alt = 'No equivalent for high-resolution timing. Timer (~15ms) for rough measurements.'
         Example = @'
 ' Before:
 QueryPerformanceCounter startCount
@@ -76,16 +77,15 @@ DoSomething
 QueryPerformanceCounter endCount
 elapsed = (endCount - startCount) / freq
 
-' After:
-Dim t As Double: t = Timer
+' After (rough timing only):
+Dim t As Single: t = Timer
 DoSomething
 Debug.Print "Elapsed: " & Format((Timer - t) * 1000, "0") & " ms"
 '@
-        Note = 'Timer has ~15ms resolution. If microsecond precision is needed, there is no pure VBA alternative.'
+        Note = 'QPC provides sub-microsecond precision. Timer provides ~15ms at best. No pure VBA equivalent for high-resolution timing.'
     }
     'QueryPerformanceFrequency' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
         Alt = '(Remove together with QueryPerformanceCounter)'
         Example = ''
         Note = ''
@@ -94,26 +94,30 @@ Debug.Print "Elapsed: " & Format((Timer - t) * 1000, "0") & " ms"
     # --- String / Memory ---
     'CopyMemory' = @{
         Lib = 'kernel32 (RtlMoveMemory)'
-        Risk = 'HIGH'
-        Alt = 'Array operations or byte-by-byte copy'
+        Alt = 'LSet (UDT copy), array assignment, or byte-by-byte copy'
         Example = @'
 ' Before:
 CopyMemory ByVal dest, ByVal src, length
 
-' After (for byte arrays):
+' After (byte arrays - direct assignment):
+destBytes() = sourceBytes()
+
+' After (byte-by-byte):
 Dim i As Long
 For i = 0 To length - 1
     dest(i) = src(i)
 Next i
 
-' Or use mid$ for strings:
+' After (UDT to UDT of same size):
+LSet destUDT = sourceUDT
+
+' After (in-place string modification):
 Mid$(dest, pos, length) = Mid$(src, 1, length)
 '@
-        Note = 'CopyMemory is often used for type punning. Refactor to avoid raw memory manipulation.'
+        Note = 'LSet copies between UDTs of the same size without API. Mid$ as a statement (left-hand side) modifies strings in-place.'
     }
     'lstrlen' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
         Alt = 'Len / LenB (VBA built-in)'
         Example = @'
 ' Before:
@@ -121,16 +125,15 @@ length = lstrlen(ByVal ptr)
 
 ' After:
 length = Len(str)     ' character count
-length = LenB(str)    ' byte count
+length = LenB(str)    ' byte count (= Len * 2 in VBA Unicode)
 '@
-        Note = ''
+        Note = 'If original code used lstrlen for ANSI buffer sizing, use LenB instead of Len.'
     }
 
     # --- User / System info ---
     'GetUserName' = @{
         Lib = 'advapi32'
-        Risk = 'LOW'
-        Alt = 'Environ$("USERNAME") or Application.UserName'
+        Alt = 'Environ$("USERNAME") for Windows login name'
         Example = @'
 ' Before:
 Dim buf As String: buf = Space(256)
@@ -138,16 +141,17 @@ Dim sz As Long: sz = 256
 GetUserName buf, sz
 userName = Left$(buf, sz - 1)
 
-' After:
+' After (Windows login name):
 userName = Environ$("USERNAME")
-' Or:
-userName = Application.UserName
+
+' CAUTION: Application.UserName is the Office display name,
+' NOT the Windows login. These are often different in
+' corporate environments.
 '@
-        Note = 'Environ$ reads the environment variable. Application.UserName reads the Office setting.'
+        Note = 'Environ$("USERNAME") = Windows login. Application.UserName = Office display name. These differ in corporate environments.'
     }
     'GetComputerName' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
         Alt = 'Environ$("COMPUTERNAME")'
         Example = @'
 ' Before:
@@ -159,11 +163,10 @@ compName = Left$(buf, sz - 1)
 ' After:
 compName = Environ$("COMPUTERNAME")
 '@
-        Note = ''
+        Note = 'Environ$ returns empty string if variable is not set. Always validate the result.'
     }
     'GetTempPath' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
         Alt = 'Environ$("TEMP")'
         Example = @'
 ' Before:
@@ -172,20 +175,19 @@ GetTempPath 260, buf
 tmpPath = Left$(buf, InStr(buf, vbNullChar) - 1)
 
 ' After:
-tmpPath = Environ$("TEMP")
+tmpPath = Environ$("TEMP") & "\"
+' Note: API appends trailing "\", Environ$ does not.
 '@
-        Note = ''
+        Note = 'GetTempPath appends trailing backslash. Environ$("TEMP") does not. Add "\" when concatenating paths.'
     }
     'GetSystemDirectory' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
         Alt = 'Environ$("WINDIR") & "\System32"'
         Example = ''
-        Note = ''
+        Note = 'Caution: 32-bit Office on 64-bit Windows uses SysWOW64. Environ$ always returns System32. Behavior may differ from the original API call.'
     }
     'GetWindowsDirectory' = @{
         Lib = 'kernel32'
-        Risk = 'LOW'
         Alt = 'Environ$("WINDIR")'
         Example = ''
         Note = ''
@@ -194,81 +196,95 @@ tmpPath = Environ$("TEMP")
     # --- Window / UI ---
     'FindWindow' = @{
         Lib = 'user32'
-        Risk = 'HIGH'
-        Alt = 'Application object properties or AppActivate'
+        Alt = 'Application.hWnd (own window only, Excel 2010+) or AppActivate'
         Example = @'
 ' Before:
 hWnd = FindWindow(vbNullString, "Window Title")
 
-' After (activate by title):
-AppActivate "Window Title"
-
-' After (get Excel window handle):
+' After (get own Excel window handle):
 hWnd = Application.hWnd  ' Excel 2010+
+
+' After (activate by title - no handle returned):
+AppActivate "Window Title"
 '@
-        Note = 'Most FindWindow usage in VBA is for getting Excel/form window handles. Use Application.hWnd instead.'
+        Note = 'Application.hWnd only returns the host app window handle. FindWindow for other app windows has no VBA equivalent. AppActivate does partial title matching - may activate wrong window.'
     }
     'SetWindowPos' = @{
         Lib = 'user32'
-        Risk = 'HIGH'
-        Alt = 'UserForm position properties or Application window properties'
+        Alt = 'UserForm position properties (positioning only, no topmost)'
         Example = @'
 ' Before:
 SetWindowPos hWnd, HWND_TOPMOST, x, y, w, h, SWP_NOSIZE
 
-' After (for UserForm):
+' After (UserForm positioning only):
 Me.StartUpPosition = 0
 Me.Left = x: Me.Top = y
+
+' For "stay visible" behavior:
+frm.Show vbModeless
 '@
-        Note = 'If used to make a form topmost, there is no pure VBA equivalent. Consider if it is really necessary.'
+        Note = 'No VBA equivalent for HWND_TOPMOST. Positioning alternative applies to UserForms only, not the application window. vbModeless keeps form visible while user works.'
     }
     'GetSystemMetrics' = @{
         Lib = 'user32'
-        Risk = 'MEDIUM'
-        Alt = 'Application.Width / Application.Height or hard-coded values'
+        Alt = 'Application.UsableWidth/Height (Excel, in points) - no pixel equivalent'
         Example = @'
 ' Before:
-screenW = GetSystemMetrics(SM_CXSCREEN)
-screenH = GetSystemMetrics(SM_CYSCREEN)
+screenW = GetSystemMetrics(SM_CXSCREEN)  ' pixels
+screenH = GetSystemMetrics(SM_CYSCREEN)  ' pixels
 
-' After:
-screenW = Application.Width   ' in points
-screenH = Application.Height
+' After (Excel - workspace size in points, excludes taskbar):
+workW = Application.UsableWidth    ' points
+workH = Application.UsableHeight   ' points
+' Note: 1 point = 1/72 inch. NOT pixels.
+
+' CAUTION: Application.Width/Height is the Excel
+' WINDOW size, not the screen size.
 '@
-        Note = 'Units differ: API returns pixels, Application properties return points.'
+        Note = 'Application.UsableWidth/Height = workspace in points (Excel only). For pixels, no pure VBA equivalent. In Access: Screen.Width/Height (twips).'
     }
     'ShowWindow' = @{
         Lib = 'user32'
-        Risk = 'HIGH'
-        Alt = 'Application.Visible or UserForm.Show/Hide'
-        Example = ''
+        Alt = 'Application.Visible, WindowState, or UserForm.Show/Hide'
+        Example = @'
+' Before:
+ShowWindow hWnd, SW_SHOW
+ShowWindow hWnd, SW_MINIMIZE
+ShowWindow hWnd, SW_MAXIMIZE
+
+' After:
+Application.Visible = True          ' show
+Application.WindowState = xlMinimized  ' minimize
+Application.WindowState = xlMaximized  ' maximize
+Application.WindowState = xlNormal     ' restore
+
+' For UserForm:
+frm.Show / frm.Hide
+'@
         Note = ''
     }
     'SetForegroundWindow' = @{
         Lib = 'user32'
-        Risk = 'MEDIUM'
         Alt = 'AppActivate (VBA built-in)'
         Example = @'
 ' Before:
 SetForegroundWindow hWnd
 
 ' After:
+On Error Resume Next  ' raises error 5 if not found
 AppActivate "Window Title"
-' Or:
-Application.Visible = True
+On Error GoTo 0
 '@
-        Note = ''
+        Note = 'AppActivate does partial title matching - may activate the wrong window if titles are similar. Always wrap in error handling.'
     }
     'SendMessage' = @{
         Lib = 'user32'
-        Risk = 'HIGH'
         Alt = 'Depends on message type. Often no direct alternative.'
         Example = ''
-        Note = 'SendMessage is highly versatile. Review each call site individually. Common uses: scrolling listboxes, setting control properties.'
+        Note = 'SendMessage is highly versatile. Review each call site individually. Common uses: scrolling listboxes, setting control properties. If used for external app automation, the business process itself may need redesign.'
     }
     'PostMessage' = @{
         Lib = 'user32'
-        Risk = 'HIGH'
         Alt = '(Same as SendMessage - review individually)'
         Example = ''
         Note = ''
@@ -277,42 +293,49 @@ Application.Visible = True
     # --- File ---
     'SHFileOperation' = @{
         Lib = 'shell32'
-        Risk = 'MEDIUM'
-        Alt = 'FileSystemObject or VBA Kill/FileCopy/Name'
+        Alt = 'FileCopy / Kill / Name / MkDir / RmDir or FileSystemObject'
         Example = @'
 ' Before:
 SHFileOperation fileOp  ' copy/move/delete with recycle bin
 
 ' After:
-' Copy:  FileCopy src, dst
-' Move:  Name src As dst
-' Delete (permanent): Kill path
+' Copy file:   FileCopy src, dst
+' Move/rename: Name src As dst
+' Delete:      Kill path  ' permanent, no recycle bin
+' Create dir:  MkDir path
+' Remove dir:  RmDir path  ' must be empty
+
+' Or use FileSystemObject for folders:
+' fso.CopyFolder / fso.DeleteFolder / fso.MoveFolder
+' Note: fso.DeleteFile is also permanent (no recycle bin)
+
 ' Delete (recycle bin): no pure VBA equivalent
 '@
-        Note = 'Recycle bin delete has no VBA equivalent. Use FileSystemObject.DeleteFile for permanent delete.'
+        Note = 'Kill does not support wildcards in the path portion (only filename). Recycle bin delete has no VBA equivalent. FileSystemObject may also be restricted by EDR.'
     }
     'ShellExecute' = @{
         Lib = 'shell32'
-        Risk = 'MEDIUM'
-        Alt = 'Shell (VBA built-in) or ThisWorkbook.FollowHyperlink'
+        Alt = 'ThisWorkbook.FollowHyperlink (documents) or Shell (executables only)'
         Example = @'
 ' Before:
 ShellExecute 0, "open", path, vbNullString, vbNullString, SW_SHOW
 
-' After (open file with default app):
+' After (open document/URL with default app - Excel only):
 ThisWorkbook.FollowHyperlink path
+' Note: may trigger security warnings
 
-' After (run program):
-Shell path, vbNormalFocus
+' After (run executable only - not documents):
+Shell "notepad.exe C:\file.txt", vbNormalFocus
+' CAUTION: Shell cannot open .pdf, .xlsx etc.
+' by file association. Use FollowHyperlink instead.
 '@
-        Note = 'Shell function is also flagged by some EDR. FollowHyperlink is safer for opening documents/URLs.'
+        Note = 'Shell only launches executables, not documents by association. FollowHyperlink is Excel-specific and may trigger security prompts.'
     }
 
     # --- Clipboard ---
     'OpenClipboard' = @{
         Lib = 'user32'
-        Risk = 'MEDIUM'
-        Alt = 'MSForms.DataObject'
+        Alt = 'MSForms.DataObject (text only)'
         Example = @'
 ' Before:
 OpenClipboard 0
@@ -320,30 +343,27 @@ hData = GetClipboardData(CF_TEXT)
 ' ...
 CloseClipboard
 
-' After:
+' After (text only):
 Dim d As New MSForms.DataObject
 d.GetFromClipboard
 text = d.GetText
 '@
-        Note = 'Requires reference to Microsoft Forms 2.0 Object Library, or use late binding.'
+        Note = 'MSForms.DataObject handles text only (no images/files). Requires Microsoft Forms 2.0 reference. Add error handling for clipboard lock failures.'
     }
     'GetClipboardData' = @{
         Lib = 'user32'
-        Risk = 'MEDIUM'
-        Alt = '(See OpenClipboard)'
+        Alt = '(See OpenClipboard - text only via MSForms.DataObject)'
         Example = ''
         Note = ''
     }
     'SetClipboardData' = @{
         Lib = 'user32'
-        Risk = 'MEDIUM'
-        Alt = 'MSForms.DataObject.SetText / PutInClipboard'
+        Alt = 'MSForms.DataObject.SetText / PutInClipboard (text only)'
         Example = ''
         Note = ''
     }
     'CloseClipboard' = @{
         Lib = 'user32'
-        Risk = 'LOW'
         Alt = '(Remove together with OpenClipboard)'
         Example = ''
         Note = ''
