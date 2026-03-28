@@ -317,8 +317,154 @@ foreach ($mod in $modules) {
 }
 
 Write-Host ""
-if ($extracted -gt 0) {
-    Write-Host "$extracted module(s) extracted to: $outDir" -ForegroundColor Green
-} else {
+if ($extracted -eq 0) {
     Write-Host "No VBA modules extracted." -ForegroundColor Yellow
+    exit 0
 }
+
+Write-Host "$extracted module(s) extracted to: $outDir" -ForegroundColor Green
+
+# ============================================================================
+# Code Analysis Report
+# ============================================================================
+
+Write-Host ""
+Write-Host "=== Code Analysis ===" -ForegroundColor Cyan
+
+$report = [System.Text.StringBuilder]::new()
+[void]$report.AppendLine("# VBA Code Analysis Report")
+[void]$report.AppendLine("# Source: $([IO.Path]::GetFileName($FilePath))")
+[void]$report.AppendLine("# Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+[void]$report.AppendLine("")
+
+$allFiles = Get-ChildItem $outDir -File
+$totalLines = 0
+
+# --- Module summary ---
+[void]$report.AppendLine("## Modules ($($allFiles.Count))")
+[void]$report.AppendLine("")
+foreach ($f in $allFiles) {
+    $lines = (Get-Content $f.FullName -Encoding UTF8).Count
+    $totalLines += $lines
+    [void]$report.AppendLine("  $($f.Name) ($lines lines)")
+}
+[void]$report.AppendLine("")
+[void]$report.AppendLine("  Total: $totalLines lines")
+[void]$report.AppendLine("")
+
+# --- Analysis patterns ---
+$patterns = [ordered]@{
+    'Win32 API (Declare)' = @{
+        Pattern = '(?m)^[^'']*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)'
+        Extract = { param($m) "$($m.Groups[3].Value) ($(if($m.Groups[1].Value){'PtrSafe'} else {'Legacy'}))" }
+    }
+    'COM / CreateObject' = @{
+        Pattern = '(?m)^[^'']*\bCreateObject\s*\(\s*"([^"]+)"'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'COM / GetObject' = @{
+        Pattern = '(?m)^[^'']*\bGetObject\s*\(\s*"?([^")\s]+)"?'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'Shell / process execution' = @{
+        Pattern = '(?m)^[^'']*\b(Shell\s*[\("]|WScript\.Shell|cmd\s*/[ck])'
+        Extract = { param($m) $m.Groups[1].Value.Trim() }
+    }
+    'File I/O (Open/Kill/FileCopy)' = @{
+        Pattern = '(?m)^[^'']*\b(Open\s+\S+\s+For\s+(Input|Output|Append|Binary|Random)|Kill\s|FileCopy\s|MkDir\s|RmDir\s)'
+        Extract = { param($m) if ($m.Groups[2].Value) { "Open For $($m.Groups[2].Value)" } else { $m.Groups[1].Value.Trim() } }
+    }
+    'FileSystemObject' = @{
+        Pattern = '(?m)^[^'']*\b(Scripting\.FileSystemObject)\b'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'Registry access' = @{
+        Pattern = '(?m)^[^'']*\b(GetSetting|SaveSetting|DeleteSetting|RegRead|RegWrite|RegDelete)\b'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'SendKeys' = @{
+        Pattern = '(?m)^[^'']*\b(SendKeys)\b'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'Late-bound object calls' = @{
+        Pattern = '(?m)^[^'']*\bSet\s+\w+\s*=\s*CreateObject\s*\(\s*"([^"]+)"'
+        Extract = { param($m) $m.Groups[1].Value }
+        Skip = $true  # already covered by CreateObject
+    }
+}
+
+$issueCount = 0
+foreach ($category in $patterns.Keys) {
+    if ($patterns[$category].Skip) { continue }
+    $p = $patterns[$category].Pattern
+    $extractFn = $patterns[$category].Extract
+    $findings = [System.Collections.ArrayList]::new()
+
+    foreach ($f in $allFiles) {
+        $content = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+        $matches2 = [regex]::Matches($content, $p)
+        foreach ($m in $matches2) {
+            $detail = & $extractFn $m
+            [void]$findings.Add("$($f.Name): $detail")
+        }
+    }
+
+    if ($findings.Count -gt 0) {
+        $issueCount += $findings.Count
+        [void]$report.AppendLine("## $category ($($findings.Count))")
+        [void]$report.AppendLine("")
+        $unique = $findings | Sort-Object -Unique
+        foreach ($item in $unique) {
+            [void]$report.AppendLine("  $item")
+        }
+        [void]$report.AppendLine("")
+    }
+}
+
+# --- External references from PROJECT stream ---
+$projEntry2 = $ole2.Entries | Where-Object { $_.Name -eq 'PROJECT' -and $_.ObjType -eq 2 } | Select-Object -First 1
+if ($projEntry2) {
+    $projData2 = Read-Ole2Stream $ole2 $projEntry2
+    $projText2 = [System.Text.Encoding]::GetEncoding(932).GetString($projData2)
+    $refs = [System.Collections.ArrayList]::new()
+    foreach ($line in $projText2 -split "`r`n|`n") {
+        if ($line -match '^Reference=') {
+            # Format: Reference=*\G{GUID}#ver#0#path#description
+            if ($line -match '#([^#]+)$') {
+                [void]$refs.Add($Matches[1])
+            } else {
+                [void]$refs.Add($line.Substring(10))
+            }
+        }
+    }
+    if ($refs.Count -gt 0) {
+        [void]$report.AppendLine("## External References ($($refs.Count))")
+        [void]$report.AppendLine("")
+        foreach ($r in $refs) {
+            [void]$report.AppendLine("  $r")
+        }
+        [void]$report.AppendLine("")
+    }
+}
+
+# --- Summary ---
+if ($issueCount -eq 0) {
+    [void]$report.AppendLine("## Result")
+    [void]$report.AppendLine("")
+    [void]$report.AppendLine("  No Win32 API, COM, Shell, or other external dependencies detected.")
+    [void]$report.AppendLine("  Migration risk: LOW")
+} else {
+    [void]$report.AppendLine("## Summary")
+    [void]$report.AppendLine("")
+    [void]$report.AppendLine("  $issueCount potential migration issue(s) detected.")
+    [void]$report.AppendLine("  Review items above before deploying to restricted environments.")
+}
+
+$reportText = $report.ToString()
+$reportPath = Join-Path $outDir "_analysis.txt"
+[IO.File]::WriteAllText($reportPath, $reportText, [System.Text.Encoding]::UTF8)
+
+# Print to console
+Write-Host ""
+Write-Host $reportText
+Write-Host "Report saved to: $reportPath" -ForegroundColor Green
