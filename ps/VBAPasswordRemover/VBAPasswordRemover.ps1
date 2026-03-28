@@ -3,7 +3,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.IO.Compression
 
 if (-not (Test-Path $FilePath)) {
     Write-Host "Error: file not found: $FilePath" -ForegroundColor Red
@@ -38,20 +37,26 @@ function Remove-PasswordXls([string]$path) {
     $data = [IO.File]::ReadAllBytes($path)
     $pos = Find-DPB $data
     if ($pos -eq -1) { return $false }
-    # DPB= -> DPx=
     $data[$pos + 2] = 0x78
     [IO.File]::WriteAllBytes($path, $data)
     return $true
 }
 
 function Remove-PasswordOoxml([string]$path) {
-    # Open ZIP in-place (Update mode) - no extract/re-create
-    $zip = [IO.Compression.ZipFile]::Open($path, [IO.Compression.ZipArchiveMode]::Update)
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $updateMode = [Enum]::Parse([Type]::GetType('System.IO.Compression.ZipArchiveMode'), 'Update')
+    $openMethod = [Type]::GetType('System.IO.Compression.ZipFile').GetMethod(
+        'Open',
+        [Type[]]@([string], [Type]::GetType('System.IO.Compression.ZipArchiveMode'))
+    )
+    $zip = $openMethod.Invoke($null, @($path, $updateMode))
+
     try {
         $entry = $zip.Entries | Where-Object { $_.Name -eq 'vbaProject.bin' } | Select-Object -First 1
         if (-not $entry) { return $false }
 
-        # Read entry
         $stream = $entry.Open()
         $ms = New-Object IO.MemoryStream
         $stream.CopyTo($ms)
@@ -62,10 +67,8 @@ function Remove-PasswordOoxml([string]$path) {
         $pos = Find-DPB $data
         if ($pos -eq -1) { return $false }
 
-        # Patch DPB= -> DPx=
         $data[$pos + 2] = 0x78
 
-        # Write back to same entry
         $stream = $entry.Open()
         $stream.SetLength(0)
         $stream.Write($data, 0, $data.Length)
