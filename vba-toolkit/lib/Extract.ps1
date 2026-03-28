@@ -6,11 +6,13 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Collect all xlsm/xlam/xls files
 $files = [System.Collections.ArrayList]::new()
+$baseDir = $null
 foreach ($p in $Paths) {
     $resolved = (Resolve-Path $p -ErrorAction SilentlyContinue).Path
     if (-not $resolved) { Write-VbaError 'Extract' $p 'Path not found'; continue }
 
     if (Test-Path $resolved -PathType Container) {
+        if (-not $baseDir) { $baseDir = $resolved }
         Get-ChildItem $resolved -Recurse -File -Include '*.xlsm','*.xlam','*.xls' | Where-Object {
             $_.FullName -notmatch '[\\/]output[\\/]'
         } | ForEach-Object {
@@ -19,6 +21,7 @@ foreach ($p in $Paths) {
     } else {
         $ext = [IO.Path]::GetExtension($resolved).ToLower()
         if ($ext -in '.xls','.xlsm','.xlam') {
+            if (-not $baseDir) { $baseDir = [IO.Path]::GetDirectoryName($resolved) }
             [void]$files.Add($resolved)
         }
     }
@@ -28,6 +31,10 @@ if ($files.Count -eq 0) {
     Write-Host "No Excel files found." -ForegroundColor Yellow
     exit 0
 }
+if (-not $baseDir) { $baseDir = [IO.Path]::GetDirectoryName($files[0]) }
+
+# Single output directory for the entire run
+$outDir = New-VbaOutputDir ($files[0]) 'extract'
 
 $totalExtracted = 0
 foreach ($FilePath in $files) {
@@ -40,7 +47,6 @@ foreach ($FilePath in $files) {
     $project = Get-AllModuleCode $FilePath -StripAttributes
     if (-not $project) { Write-VbaError 'Extract' $fileName 'No vbaProject.bin found'; continue }
 
-    $outDir = New-VbaOutputDir $FilePath 'extract'
     $modulesDir = Join-Path $outDir 'modules'
     New-Item $modulesDir -ItemType Directory -Force | Out-Null
 
@@ -66,18 +72,17 @@ foreach ($FilePath in $files) {
     [void]$combined.AppendLine("=" * 80)
     [void]$combined.AppendLine("")
 
-    # Module index
     [void]$combined.AppendLine("MODULE INDEX")
     [void]$combined.AppendLine("-" * 40)
     [void]$combined.AppendLine("")
 
     $stdMods = @(); $clsMods = @(); $frmMods = @(); $docMods = @()
     foreach ($f in $allFiles) {
-        $ext = $f.Extension.TrimStart('.')
+        $fExt = $f.Extension.TrimStart('.')
         $lc = (Get-Content $f.FullName -Encoding UTF8).Count
         $totalLines += $lc
         $entry = "    $([IO.Path]::GetFileNameWithoutExtension($f.Name)) ($lc lines)"
-        switch ($ext) {
+        switch ($fExt) {
             'bas' { $stdMods += $entry }
             'cls' { $clsMods += $entry }
             'frm' { $frmMods += $entry }

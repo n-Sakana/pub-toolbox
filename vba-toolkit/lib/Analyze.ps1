@@ -377,8 +377,17 @@ foreach ($filePath in $files) {
     # Determine output prefix for colliding names
     $outPrefix = $baseName
     if ($fileNameCounts[$baseName] -gt 1) {
-        $parentDir = Split-Path (Split-Path $filePath -Parent) -Leaf
-        $outPrefix = "${parentDir}_${baseName}"
+        # Use relative path as prefix to avoid collisions at any depth
+        $relDir = ''
+        if ($filePath.StartsWith($baseDir)) {
+            $relDir = [IO.Path]::GetDirectoryName($filePath.Substring($baseDir.Length).TrimStart('\', '/'))
+        }
+        if ($relDir) {
+            $outPrefix = ($relDir -replace '[\\/]', '_') + "_$baseName"
+        } else {
+            $parentDir = Split-Path (Split-Path $filePath -Parent) -Leaf
+            $outPrefix = "${parentDir}_${baseName}"
+        }
     }
 
     # Relative path from base

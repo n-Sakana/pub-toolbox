@@ -59,6 +59,10 @@ if ($ext -eq '.xls') {
             $wb.Close($false)
         }
     }
+    catch {
+        $result = 'error'
+        $errorMsg = $_.Exception.Message
+    }
     finally {
         try { $excel.Quit() } catch {}
         [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null
@@ -77,6 +81,9 @@ if ($result -eq 'patched') {
     Write-Host "  3. Clear the password fields and click OK" -ForegroundColor Gray
     Write-Host "  4. Save the file" -ForegroundColor Gray
     Write-VbaLog 'Unlock' $FilePath "Patched | -> $outDir"
+} elseif ($result -eq 'error') {
+    Remove-Item $copyPath -Force -ErrorAction SilentlyContinue
+    Write-VbaError 'Unlock' $fileName "Failed to process: $errorMsg"
 } else {
     Remove-Item $copyPath -Force -ErrorAction SilentlyContinue
     Write-VbaStatus 'Unlock' $fileName "No VBA password hash (DPB=) found"
