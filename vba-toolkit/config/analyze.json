@@ -3,6 +3,7 @@
     "Win32 API (Declare)": { "detect": true, "sanitize": true },
     "DLL loading": { "detect": true, "sanitize": true },
     "COM / CreateObject": { "detect": true, "sanitize": false },
+    "COM / GetObject": { "detect": true, "sanitize": false },
     "Shell / process": { "detect": true, "sanitize": false },
     "File I/O": { "detect": true, "sanitize": false },
     "FileSystemObject": { "detect": true, "sanitize": false },

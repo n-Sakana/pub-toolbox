@@ -16,6 +16,7 @@ function Get-DefaultConfig {
             'Win32 API (Declare)' = @{ detect = $true; sanitize = $true }
             'DLL loading' = @{ detect = $true; sanitize = $true }
             'COM / CreateObject' = @{ detect = $true; sanitize = $false }
+            'COM / GetObject' = @{ detect = $true; sanitize = $false }
             'Shell / process' = @{ detect = $true; sanitize = $false }
             'File I/O' = @{ detect = $true; sanitize = $false }
             'FileSystemObject' = @{ detect = $true; sanitize = $false }
@@ -162,7 +163,7 @@ if (-not $Paths -or $Paths.Count -eq 0) {
     $lblSanitize1.Font = New-Object System.Drawing.Font('Segoe UI', 8)
     $grpEdr.Controls.Add($lblSanitize1)
 
-    $edrControls = @{}
+    $edrControls = [ordered]@{}
     $row = 0
     foreach ($name in $cfg.edr.Keys) {
         $y = 36 + ($row * 24)
@@ -213,7 +214,7 @@ if (-not $Paths -or $Paths.Count -eq 0) {
     $lblSanitize2.Font = New-Object System.Drawing.Font('Segoe UI', 8)
     $grpCompat.Controls.Add($lblSanitize2)
 
-    $compatControls = @{}
+    $compatControls = [ordered]@{}
     $row = 0
     foreach ($name in $cfg.compat.Keys) {
         $y = 36 + ($row * 24)
@@ -897,6 +898,9 @@ content.addEventListener('click', (e) => {
             -ExtraHtml $extraHtml -ExtraJs $analyzeJs `
             -HighlightSelector 'tr.hl-sanitized, tr.hl-edr, tr.hl-compat' `
             -FirstTabIndex $firstHlIdx -OutputPath $htmlPath
+
+        # Open HTML for single-file runs
+        if ($files.Count -eq 1) { Start-Process $htmlPath }
 
     } catch {
         $csvRow.Error = $_.Exception.Message
