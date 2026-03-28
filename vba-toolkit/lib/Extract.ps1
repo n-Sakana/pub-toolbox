@@ -62,56 +62,56 @@ foreach ($f in $allFiles) {
 
 $patterns = [ordered]@{
     'Win32 API (Declare)' = @{
-        Pattern = '(?m)^[^'']*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)'
+        Pattern = '(?m)^[^''\r\n]*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)'
         Extract = { param($m) "$($m.Groups[3].Value) ($(if($m.Groups[1].Value){'PtrSafe'} else {'Legacy'}))" }
     }
     'COM / CreateObject' = @{
-        Pattern = '(?m)^[^'']*\bCreateObject\s*\(\s*"([^"]+)"'
+        Pattern = '(?m)^[^''\r\n]*\bCreateObject\s*\(\s*"([^"]+)"'
         Extract = { param($m) $m.Groups[1].Value }
     }
     'COM / GetObject' = @{
-        Pattern = '(?m)^[^'']*\bGetObject\s*\(\s*"?([^")\s]+)"?'
+        Pattern = '(?m)^[^''\r\n]*\bGetObject\s*\(\s*"?([^")\s]+)"?'
         Extract = { param($m) $m.Groups[1].Value }
     }
     'Shell / process execution' = @{
-        Pattern = '(?m)^[^'']*\b(Shell\s*[\("]|WScript\.Shell|cmd\s*/[ck])'
+        Pattern = '(?m)^[^''\r\n]*\b(Shell\s*[\("]|WScript\.Shell|cmd\s*/[ck])'
         Extract = { param($m) $m.Groups[1].Value.Trim() }
     }
     'File I/O' = @{
-        Pattern = '(?m)^[^'']*\b(Open\s+\S+\s+For\s+(Input|Output|Append|Binary|Random)|Kill\s|FileCopy\s|MkDir\s|RmDir\s)'
+        Pattern = '(?m)^[^''\r\n]*\b(Open\s+\S+\s+For\s+(Input|Output|Append|Binary|Random)|Kill\s|FileCopy\s|MkDir\s|RmDir\s)'
         Extract = { param($m) if ($m.Groups[2].Value) { "Open For $($m.Groups[2].Value)" } else { $m.Groups[1].Value.Trim() } }
     }
     'FileSystemObject' = @{
-        Pattern = '(?m)^[^'']*\b(Scripting\.FileSystemObject)\b'
+        Pattern = '(?m)^[^''\r\n]*\b(Scripting\.FileSystemObject)\b'
         Extract = { param($m) $m.Groups[1].Value }
     }
     'Registry' = @{
-        Pattern = '(?m)^[^'']*\b(GetSetting|SaveSetting|DeleteSetting|RegRead|RegWrite|RegDelete)\b'
+        Pattern = '(?m)^[^''\r\n]*\b(GetSetting|SaveSetting|DeleteSetting|RegRead|RegWrite|RegDelete)\b'
         Extract = { param($m) $m.Groups[1].Value }
     }
-    'SendKeys' = @{ Pattern = '(?m)^[^'']*\b(SendKeys)\b'; Extract = { param($m) $m.Groups[1].Value } }
+    'SendKeys' = @{ Pattern = '(?m)^[^''\r\n]*\b(SendKeys)\b'; Extract = { param($m) $m.Groups[1].Value } }
     'Network / HTTP' = @{
-        Pattern = '(?m)^[^'']*\b(MSXML2\.XMLHTTP|WinHttp\.WinHttpRequest|URLDownloadToFile|MSXML2\.ServerXMLHTTP)\b'
+        Pattern = '(?m)^[^''\r\n]*\b(MSXML2\.XMLHTTP|WinHttp\.WinHttpRequest|URLDownloadToFile|MSXML2\.ServerXMLHTTP)\b'
         Extract = { param($m) $m.Groups[1].Value }
     }
     'PowerShell / WScript' = @{
-        Pattern = '(?mi)^[^'']*\b(powershell|wscript|cscript|mshta)\b'
+        Pattern = '(?mi)^[^''\r\n]*\b(powershell|wscript|cscript|mshta)\b'
         Extract = { param($m) $m.Groups[1].Value }
     }
     'Process / WMI' = @{
-        Pattern = '(?m)^[^'']*\b(winmgmts|Win32_Process|WbemScripting|ExecQuery)\b'
+        Pattern = '(?m)^[^''\r\n]*\b(winmgmts|Win32_Process|WbemScripting|ExecQuery)\b'
         Extract = { param($m) $m.Groups[1].Value }
     }
     'DLL loading' = @{
-        Pattern = '(?m)^[^'']*\b(LoadLibrary|GetProcAddress|FreeLibrary|CallByName)\b'
+        Pattern = '(?m)^[^''\r\n]*\b(LoadLibrary|GetProcAddress|FreeLibrary|CallByName)\b'
         Extract = { param($m) $m.Groups[1].Value }
     }
     'Clipboard' = @{
-        Pattern = '(?m)^[^'']*\b(MSForms\.DataObject|GetClipboardData|SetClipboardData)\b'
+        Pattern = '(?m)^[^''\r\n]*\b(MSForms\.DataObject|GetClipboardData|SetClipboardData)\b'
         Extract = { param($m) $m.Groups[1].Value }
     }
     'Environment' = @{
-        Pattern = '(?m)^[^'']*\b(Environ\s*\$?\s*\()'
+        Pattern = '(?m)^[^''\r\n]*\b(Environ\s*\$?\s*\()'
         Extract = { param($m) "Environ" }
     }
     'Auto-execution' = @{
@@ -119,7 +119,7 @@ $patterns = [ordered]@{
         Extract = { param($m) $m.Groups[2].Value }
     }
     'Encoding / obfuscation' = @{
-        Pattern = '(?m)^[^'']*\b(Chr\s*\$?\s*\(\s*\d+\s*\))'
+        Pattern = '(?m)^[^''\r\n]*\b(Chr\s*\$?\s*\(\s*\d+\s*\))'
         Extract = { param($m) $m.Groups[1].Value }
         Aggregate = $true
     }
@@ -218,10 +218,10 @@ $allProgIds = [System.Collections.ArrayList]::new()
 $allApis = [System.Collections.ArrayList]::new()
 foreach ($f in $allFiles) {
     $c = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
-    foreach ($m in [regex]::Matches($c, '(?m)^[^'']*\bCreateObject\s*\(\s*"([^"]+)"')) {
+    foreach ($m in [regex]::Matches($c, '(?m)^[^''\r\n]*\bCreateObject\s*\(\s*"([^"]+)"')) {
         $v = $m.Groups[1].Value; if ($allProgIds -notcontains $v) { [void]$allProgIds.Add($v) }
     }
-    foreach ($m in [regex]::Matches($c, '(?m)^[^'']*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)')) {
+    foreach ($m in [regex]::Matches($c, '(?m)^[^''\r\n]*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)')) {
         [void]$allApis.Add($m.Groups[3].Value)
     }
 }
