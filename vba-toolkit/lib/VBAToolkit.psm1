@@ -6,37 +6,198 @@
 $ErrorActionPreference = 'Stop'
 
 # ============================================================================
+# C# Native Implementation (high-performance byte operations)
+# ============================================================================
+
+if (-not ([System.Management.Automation.PSTypeName]'VbaToolkitNative').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Collections.Generic;
+
+public static class VbaToolkitNative
+{
+    public static byte[] ReadSectorChain(byte[] bytes, int startSector, int sectorSize, int[] fat)
+    {
+        var ms = new MemoryStream();
+        var visited = new HashSet<int>();
+        int s = startSector;
+        while (s >= 0 && s != -2 && s != -1 && !visited.Contains(s))
+        {
+            visited.Add(s);
+            int off = (s + 1) * sectorSize;
+            if (off + sectorSize > bytes.Length) break;
+            ms.Write(bytes, off, sectorSize);
+            s = (s < fat.Length) ? fat[s] : -1;
+        }
+        return ms.ToArray();
+    }
+
+    public static byte[] ReadMiniStream(byte[] miniStreamData, int startSector, int size, int miniSectorSize, int[] miniFat)
+    {
+        var data = new byte[size];
+        int s = startSector;
+        int written = 0;
+        while (s >= 0 && s != -2 && written < size)
+        {
+            int off = s * miniSectorSize;
+            int toRead = Math.Min(miniSectorSize, size - written);
+            if (off + toRead <= miniStreamData.Length)
+                Array.Copy(miniStreamData, off, data, written, toRead);
+            written += miniSectorSize;
+            s = (s < miniFat.Length) ? miniFat[s] : -1;
+        }
+        return data;
+    }
+
+    public static byte[] DecompressVba(byte[] data, int offset)
+    {
+        if (offset >= data.Length || data[offset] != 1) return new byte[0];
+        var result = new List<byte>(data.Length * 2);
+        int pos = offset + 1;
+        while (pos < data.Length - 1)
+        {
+            if (pos + 1 >= data.Length) break;
+            ushort header = BitConverter.ToUInt16(data, pos); pos += 2;
+            int chunkSize = (header & 0x0FFF) + 3;
+            bool isCompressed = (header & 0x8000) != 0;
+            if (!isCompressed)
+            {
+                int toCopy = Math.Min(4096, data.Length - pos);
+                for (int c = 0; c < toCopy; c++) result.Add(data[pos + c]);
+                pos += toCopy;
+                continue;
+            }
+            int chunkEnd = pos + chunkSize - 2;
+            if (chunkEnd > data.Length) chunkEnd = data.Length;
+            int decompStart = result.Count;
+            while (pos < chunkEnd)
+            {
+                if (pos >= data.Length) break;
+                byte flagByte = data[pos]; pos++;
+                for (int bit = 0; bit < 8 && pos < chunkEnd; bit++)
+                {
+                    if ((flagByte & (1 << bit)) == 0)
+                    {
+                        result.Add(data[pos]); pos++;
+                    }
+                    else
+                    {
+                        if (pos + 1 >= data.Length) { pos = chunkEnd; break; }
+                        ushort token = BitConverter.ToUInt16(data, pos); pos += 2;
+                        int dPos = result.Count - decompStart;
+                        if (dPos < 1) dPos = 1;
+                        int bitCount = 4;
+                        while ((1 << bitCount) < dPos) bitCount++;
+                        if (bitCount > 12) bitCount = 12;
+                        int lengthMask = 0xFFFF >> bitCount;
+                        int copyLen = (token & lengthMask) + 3;
+                        int copyOff = (token >> (16 - bitCount)) + 1;
+                        for (int c = 0; c < copyLen; c++)
+                        {
+                            int srcIdx = result.Count - copyOff;
+                            if (srcIdx >= 0 && srcIdx < result.Count)
+                                result.Add(result[srcIdx]);
+                        }
+                    }
+                }
+            }
+            pos = chunkEnd;
+        }
+        return result.ToArray();
+    }
+
+    public static byte[] CompressVba(byte[] data)
+    {
+        var result = new MemoryStream();
+        result.WriteByte(1);
+        int srcPos = 0;
+        while (srcPos < data.Length)
+        {
+            int chunkStart = srcPos;
+            int chunkEnd = Math.Min(srcPos + 4096, data.Length);
+            var chunkBuf = new MemoryStream();
+            int dPos = srcPos;
+            while (dPos < chunkEnd)
+            {
+                long flagPos = chunkBuf.Position;
+                chunkBuf.WriteByte(0);
+                byte flagByte = 0;
+                for (int bit = 0; bit < 8 && dPos < chunkEnd; bit++)
+                {
+                    int bestLen = 0, bestOff = 0;
+                    int decompPos = dPos - chunkStart;
+                    if (decompPos < 1) decompPos = 1;
+                    int bitCount = 4;
+                    while ((1 << bitCount) < decompPos) bitCount++;
+                    if (bitCount > 12) bitCount = 12;
+                    int maxOff = 1 << bitCount;
+                    int maxLen = (0xFFFF >> bitCount) + 3;
+                    for (int off = 1; off <= Math.Min(maxOff, dPos - chunkStart); off++)
+                    {
+                        int matchLen = 0;
+                        while (matchLen < maxLen && dPos + matchLen < chunkEnd)
+                        {
+                            if (data[dPos - off + (matchLen % off)] != data[dPos + matchLen]) break;
+                            matchLen++;
+                        }
+                        if (matchLen >= 3 && matchLen > bestLen) { bestLen = matchLen; bestOff = off; }
+                    }
+                    if (bestLen >= 3)
+                    {
+                        flagByte |= (byte)(1 << bit);
+                        int token = ((bestOff - 1) << (16 - bitCount)) | (bestLen - 3);
+                        chunkBuf.WriteByte((byte)(token & 0xFF));
+                        chunkBuf.WriteByte((byte)((token >> 8) & 0xFF));
+                        dPos += bestLen;
+                    }
+                    else
+                    {
+                        chunkBuf.WriteByte(data[dPos]); dPos++;
+                    }
+                }
+                long savedPos = chunkBuf.Position;
+                chunkBuf.Position = flagPos;
+                chunkBuf.WriteByte(flagByte);
+                chunkBuf.Position = savedPos;
+            }
+            byte[] compressed = chunkBuf.ToArray();
+            srcPos = dPos;
+            ushort hdr = (ushort)(0x8000 | 0x3000 | (compressed.Length + 2 - 3));
+            result.WriteByte((byte)(hdr & 0xFF));
+            result.WriteByte((byte)((hdr >> 8) & 0xFF));
+            result.Write(compressed, 0, compressed.Length);
+        }
+        return result.ToArray();
+    }
+
+    public static int FindPattern(byte[] data, byte[] pattern)
+    {
+        for (int i = 0; i <= data.Length - pattern.Length; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < pattern.Length; j++)
+            {
+                if (data[i + j] != pattern[j]) { match = false; break; }
+            }
+            if (match) return i;
+        }
+        return -1;
+    }
+}
+'@
+}
+
+# ============================================================================
 # OLE2 Compound Document Parser
 # ============================================================================
 
 function Read-SectorChain([byte[]]$bytes, [int]$startSector, [int]$sectorSize, [int[]]$fat) {
-    $ms = New-Object System.IO.MemoryStream
-    $s = $startSector
-    $visited = @{}
-    while ($s -ge 0 -and $s -ne -2 -and $s -ne -1 -and -not $visited.ContainsKey($s)) {
-        $visited[$s] = $true
-        $off = ($s + 1) * $sectorSize
-        if ($off + $sectorSize -gt $bytes.Length) { break }
-        $ms.Write($bytes, $off, $sectorSize)
-        if ($s -lt $fat.Length) { $s = $fat[$s] } else { break }
-    }
-    return ,$ms.ToArray()
+    return ,[VbaToolkitNative]::ReadSectorChain($bytes, $startSector, $sectorSize, $fat)
 }
 
 function Read-MiniStream([byte[]]$miniStreamData, [int]$startSector, [int]$size, [int]$miniSectorSize, [int[]]$miniFat) {
-    $data = New-Object byte[] $size
-    $s = $startSector
-    $written = 0
-    while ($s -ge 0 -and $s -ne -2 -and $written -lt $size) {
-        $off = $s * $miniSectorSize
-        $toRead = [Math]::Min($miniSectorSize, $size - $written)
-        if ($off + $toRead -le $miniStreamData.Length) {
-            [Array]::Copy($miniStreamData, $off, $data, $written, $toRead)
-        }
-        $written += $toRead
-        if ($s -lt $miniFat.Length) { $s = $miniFat[$s] } else { break }
-    }
-    return ,$data
+    return ,[VbaToolkitNative]::ReadMiniStream($miniStreamData, $startSector, $size, $miniSectorSize, $miniFat)
 }
 
 function Read-Ole2([byte[]]$bytes) {
@@ -196,121 +357,11 @@ function Write-Ole2Stream([byte[]]$ole2Bytes, $ole2, $entry, [byte[]]$newData) {
 # ============================================================================
 
 function Decompress-VBA([byte[]]$data, [int]$offset) {
-    if ($offset -ge $data.Length -or $data[$offset] -ne 1) { return ,[byte[]]@() }
-    $pos = $offset + 1
-    $result = New-Object System.IO.MemoryStream
-    while ($pos -lt $data.Length - 1) {
-        if ($pos + 1 -ge $data.Length) { break }
-        $header = [BitConverter]::ToUInt16($data, $pos); $pos += 2
-        $chunkSize = ($header -band 0x0FFF) + 3
-        $isCompressed = ($header -band 0x8000) -ne 0
-        if (-not $isCompressed) {
-            $toCopy = [Math]::Min(4096, $data.Length - $pos)
-            $result.Write($data, $pos, $toCopy); $pos += $toCopy; continue
-        }
-        $chunkEnd = $pos + $chunkSize - 2
-        if ($chunkEnd -gt $data.Length) { $chunkEnd = $data.Length }
-        $decompStart = $result.Length
-        while ($pos -lt $chunkEnd) {
-            if ($pos -ge $data.Length) { break }
-            $flagByte = $data[$pos]; $pos++
-            for ($bit = 0; $bit -lt 8 -and $pos -lt $chunkEnd; $bit++) {
-                if (($flagByte -band (1 -shl $bit)) -eq 0) {
-                    $result.WriteByte($data[$pos]); $pos++
-                } else {
-                    if ($pos + 1 -ge $data.Length) { $pos = $chunkEnd; break }
-                    $token = [BitConverter]::ToUInt16($data, $pos); $pos += 2
-                    $dPos = [int]($result.Length - $decompStart)
-                    if ($dPos -lt 1) { $dPos = 1 }
-                    $bitCount = 4
-                    while ((1 -shl $bitCount) -lt $dPos) { $bitCount++ }
-                    if ($bitCount -gt 12) { $bitCount = 12 }
-                    $lengthMask = 0xFFFF -shr $bitCount
-                    $copyLen = ($token -band $lengthMask) + 3
-                    $copyOff = ($token -shr (16 - $bitCount)) + 1
-                    $buf = $result.ToArray()
-                    for ($c = 0; $c -lt $copyLen; $c++) {
-                        $srcIdx = $buf.Length - $copyOff
-                        if ($srcIdx -ge 0 -and $srcIdx -lt $buf.Length) {
-                            $result.WriteByte($buf[$srcIdx]); $buf = $result.ToArray()
-                        }
-                    }
-                }
-            }
-        }
-        $pos = $chunkEnd
-    }
-    return ,$result.ToArray()
+    return ,[VbaToolkitNative]::DecompressVba($data, $offset)
 }
 
-# ============================================================================
-# VBA Compression (MS-OVBA 2.4.1)
-# ============================================================================
-
 function Compress-VBA([byte[]]$data) {
-    $result = New-Object System.IO.MemoryStream
-    $result.WriteByte(0x01)
-    $srcPos = 0
-    while ($srcPos -lt $data.Length) {
-        $chunkStart = $srcPos
-        $chunkEnd = [Math]::Min($srcPos + 4096, $data.Length)
-        $chunkBuf = New-Object System.IO.MemoryStream
-        $dPos = $srcPos
-        while ($dPos -lt $chunkEnd) {
-            $flagPos = $chunkBuf.Position
-            $chunkBuf.WriteByte(0)
-            $flagByte = 0
-            for ($bit = 0; $bit -lt 8 -and $dPos -lt $chunkEnd; $bit++) {
-                $bestLen = 0; $bestOff = 0
-                $decompPos = $dPos - $chunkStart
-                if ($decompPos -lt 1) { $decompPos = 1 }
-                $bitCount = 4
-                while ((1 -shl $bitCount) -lt $decompPos) { $bitCount++ }
-                if ($bitCount -gt 12) { $bitCount = 12 }
-                $maxOff = (1 -shl $bitCount)
-                $maxLen = (0xFFFF -shr $bitCount) + 3
-                for ($off = 1; $off -le [Math]::Min($maxOff, $dPos - $chunkStart); $off++) {
-                    $matchLen = 0
-                    while ($matchLen -lt $maxLen -and ($dPos + $matchLen) -lt $chunkEnd) {
-                        if ($data[$dPos - $off + ($matchLen % $off)] -ne $data[$dPos + $matchLen]) { break }
-                        $matchLen++
-                    }
-                    if ($matchLen -ge 3 -and $matchLen -gt $bestLen) { $bestLen = $matchLen; $bestOff = $off }
-                }
-                if ($bestLen -ge 3) {
-                    $flagByte = $flagByte -bor (1 -shl $bit)
-                    $token = (($bestOff - 1) -shl (16 - $bitCount)) -bor ($bestLen - 3)
-                    $chunkBuf.WriteByte([byte]($token -band 0xFF))
-                    $chunkBuf.WriteByte([byte](($token -shr 8) -band 0xFF))
-                    $dPos += $bestLen
-                } else {
-                    $chunkBuf.WriteByte($data[$dPos]); $dPos++
-                }
-            }
-            $savedPos = $chunkBuf.Position
-            $chunkBuf.Position = $flagPos
-            $chunkBuf.WriteByte($flagByte)
-            $chunkBuf.Position = $savedPos
-        }
-        $compressed = $chunkBuf.ToArray()
-        $srcPos = $dPos
-        if ($compressed.Length -lt 4096) {
-            $hdr = [uint16](0x8000 -bor 0x3000 -bor ($compressed.Length + 2 - 3))
-            $result.WriteByte([byte]($hdr -band 0xFF))
-            $result.WriteByte([byte](($hdr -shr 8) -band 0xFF))
-            $result.Write($compressed, 0, $compressed.Length)
-        } else {
-            $hdr = [uint16](0x3000 -bor (4096 + 2 - 3))
-            $result.WriteByte([byte]($hdr -band 0xFF))
-            $result.WriteByte([byte](($hdr -shr 8) -band 0xFF))
-            $result.Write($data, $chunkStart, $chunkEnd - $chunkStart)
-            if ($chunkEnd - $chunkStart -lt 4096) {
-                $pad = New-Object byte[] (4096 - ($chunkEnd - $chunkStart))
-                $result.Write($pad, 0, $pad.Length)
-            }
-        }
-    }
-    return ,$result.ToArray()
+    return ,[VbaToolkitNative]::CompressVba($data)
 }
 
 # ============================================================================
