@@ -311,7 +311,7 @@ foreach ($mod in $modules) {
     }
 
     $outPath = Join-Path $outDir "$($mod.Name).$($mod.Ext)"
-    [IO.File]::WriteAllText($outPath, $codeText, [System.Text.Encoding]::GetEncoding(932))
+    [IO.File]::WriteAllText($outPath, $codeText, [System.Text.Encoding]::UTF8)
     Write-Host "  $($mod.Name).$($mod.Ext)" -ForegroundColor Green
     $extracted++
 }
