@@ -510,3 +510,140 @@ $reportPath = Join-Path $outDir "_analysis.txt"
 Write-Host ""
 Write-Host $reportText
 Write-Host "Report saved to: $reportPath" -ForegroundColor Green
+
+# ============================================================================
+# Combined source file with architecture header
+# ============================================================================
+
+$combined = [System.Text.StringBuilder]::new()
+
+# --- Architecture header ---
+[void]$combined.AppendLine("=" * 80)
+[void]$combined.AppendLine(" $([IO.Path]::GetFileName($FilePath)) - VBA Source Code (Combined)")
+[void]$combined.AppendLine(" Extracted: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+[void]$combined.AppendLine("=" * 80)
+[void]$combined.AppendLine("")
+
+# Module index
+[void]$combined.AppendLine("MODULE INDEX")
+[void]$combined.AppendLine("-" * 40)
+
+$stdModules = [System.Collections.ArrayList]::new()
+$clsModules = [System.Collections.ArrayList]::new()
+$frmModules = [System.Collections.ArrayList]::new()
+$docModules = [System.Collections.ArrayList]::new()
+
+foreach ($mod in $modules) {
+    $f = Get-Item (Join-Path $outDir "$($mod.Name).$($mod.Ext)") -ErrorAction SilentlyContinue
+    if (-not $f) { continue }
+    $lines = (Get-Content $f.FullName -Encoding UTF8).Count
+    $entry = "$($mod.Name) ($lines lines)"
+    switch ($mod.Ext) {
+        'bas' { [void]$stdModules.Add($entry) }
+        'cls' {
+            $content = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+            if ($content -match 'Attribute\s+VB_PredeclaredId\s*=\s*True.*Attribute\s+VB_Exposed\s*=\s*False' -or
+                $mod.Name -match '^(ThisWorkbook|Sheet\d+)$') {
+                [void]$docModules.Add($entry)
+            } else {
+                [void]$clsModules.Add($entry)
+            }
+        }
+        'frm' { [void]$frmModules.Add($entry) }
+    }
+}
+
+if ($stdModules.Count -gt 0) {
+    [void]$combined.AppendLine("")
+    [void]$combined.AppendLine("  Standard Modules:")
+    foreach ($m in $stdModules) { [void]$combined.AppendLine("    $m") }
+}
+if ($clsModules.Count -gt 0) {
+    [void]$combined.AppendLine("")
+    [void]$combined.AppendLine("  Class Modules:")
+    foreach ($m in $clsModules) { [void]$combined.AppendLine("    $m") }
+}
+if ($frmModules.Count -gt 0) {
+    [void]$combined.AppendLine("")
+    [void]$combined.AppendLine("  UserForms:")
+    foreach ($m in $frmModules) { [void]$combined.AppendLine("    $m") }
+}
+if ($docModules.Count -gt 0) {
+    [void]$combined.AppendLine("")
+    [void]$combined.AppendLine("  Document Modules:")
+    foreach ($m in $docModules) { [void]$combined.AppendLine("    $m") }
+}
+
+[void]$combined.AppendLine("")
+[void]$combined.AppendLine("  Total: $totalLines lines across $($allFiles.Count) modules")
+[void]$combined.AppendLine("")
+
+# --- Dependency summary (compact) ---
+[void]$combined.AppendLine("DEPENDENCIES")
+[void]$combined.AppendLine("-" * 40)
+
+# Collect unique CreateObject progIDs
+$allProgIds = [System.Collections.ArrayList]::new()
+foreach ($f in $allFiles) {
+    $content = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+    $coMatches = [regex]::Matches($content, '(?m)^[^'']*\bCreateObject\s*\(\s*"([^"]+)"')
+    foreach ($cm in $coMatches) {
+        $progId = $cm.Groups[1].Value
+        if ($allProgIds -notcontains $progId) { [void]$allProgIds.Add($progId) }
+    }
+}
+if ($allProgIds.Count -gt 0) {
+    [void]$combined.AppendLine("")
+    [void]$combined.AppendLine("  COM Objects:")
+    foreach ($progId in $allProgIds | Sort-Object) { [void]$combined.AppendLine("    $progId") }
+}
+
+# Win32 API
+$allApis = [System.Collections.ArrayList]::new()
+foreach ($f in $allFiles) {
+    $content = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+    $apiMatches = [regex]::Matches($content, '(?m)^[^'']*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)')
+    foreach ($am in $apiMatches) {
+        [void]$allApis.Add($am.Groups[3].Value)
+    }
+}
+if ($allApis.Count -gt 0) {
+    [void]$combined.AppendLine("")
+    [void]$combined.AppendLine("  Win32 API:")
+    foreach ($api in $allApis | Sort-Object -Unique) { [void]$combined.AppendLine("    $api") }
+}
+
+if ($allProgIds.Count -eq 0 -and $allApis.Count -eq 0) {
+    [void]$combined.AppendLine("")
+    [void]$combined.AppendLine("  (none)")
+}
+
+[void]$combined.AppendLine("")
+[void]$combined.AppendLine("")
+
+# --- Append each module ---
+$moduleOrder = @('bas', 'cls', 'frm')
+$sortedFiles = $allFiles | Sort-Object {
+    $ext = $_.Extension.TrimStart('.')
+    $order = [Array]::IndexOf($moduleOrder, $ext)
+    if ($order -lt 0) { $order = 99 }
+    "{0:D2}_{1}" -f $order, $_.Name
+}
+
+foreach ($f in $sortedFiles) {
+    $content = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+    # Strip Attribute lines for readability
+    $cleanLines = ($content -split "`r`n|`n") | Where-Object { $_ -notmatch '^\s*Attribute\s+VB_' }
+    $cleanContent = ($cleanLines -join "`r`n").TrimStart("`r`n")
+
+    [void]$combined.AppendLine("=" * 80)
+    [void]$combined.AppendLine(" $($f.Name)")
+    [void]$combined.AppendLine("=" * 80)
+    [void]$combined.AppendLine("")
+    [void]$combined.AppendLine($cleanContent)
+    [void]$combined.AppendLine("")
+}
+
+$combinedPath = Join-Path ([IO.Path]::GetDirectoryName($FilePath)) "${baseName}_combined.txt"
+[IO.File]::WriteAllText($combinedPath, $combined.ToString(), [System.Text.Encoding]::UTF8)
+Write-Host "Combined source: $combinedPath" -ForegroundColor Green
