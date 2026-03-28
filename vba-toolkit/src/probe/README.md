@@ -1,23 +1,22 @@
 # Environment Probe
 
-toolkit が検知するパターンが新環境で実際に動くかを確認する使い捨てマクロ。
+toolkit が検知するパターンが新環境で実際に動くかを PowerShell + Excel COM でテストする。
 
 ## 使い方
 
-1. 新しい空の `.xlsm` を作成
-2. VBE (Alt+F11) で `Probe.bas` をインポート
-3. `Alt+F8` → `Probe_Run` を実行
-4. ダイアログで Basic / Basic+Extended を選択
-5. 結果が `probe_result_<PC名>_<日時>.txt` に出力される
+`Probe.bat` をダブルクリック。B (Basic) または E (Extended) を選択。
 
-## Basic テスト
+## 仕組み
 
-COM 生成、ファイル I/O、レジストリ、Environ、クリップボード、VarPtr、DAO、レガシーコントロール等。安全。
+VBA ファイルではなく PowerShell スクリプト。Excel COM で一時的な xlsm を生成し、テスト対象のコードを動的に注入して:
 
-## Extended テスト
+1. **保存できるか** — EDR が Declare 文をブロックするかを検出
+2. **実行できるか** — マクロを Run して結果を取得
+3. **結果が正しいか** — 戻り値を検証
 
-Win32 API、Shell、PowerShell、DDE、IE 等。EDR アラートを招く可能性あり。デフォルト無効。
+テストごとに独立した xlsm を作成・破棄するため、1つの失敗が他に波及しない。
 
-## SendKeys について
+## Basic / Extended
 
-呼び出し可否の確認のみ。空文字列で副作用なし。環境によるブロック有無の実測としては限定的。
+- **Basic**: COM 生成、ファイル I/O、レジストリ、VBA注入テスト。安全。
+- **Extended**: Shell、PowerShell、WMI、DDE。EDR アラートの可能性あり。
