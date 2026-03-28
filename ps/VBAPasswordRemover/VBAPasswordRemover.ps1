@@ -44,30 +44,38 @@ function Remove-PasswordXls([string]$path) {
 }
 
 function Remove-PasswordOoxml([string]$path) {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -AssemblyName System.IO.Compression
 
-    $tempDir = Join-Path ([IO.Path]::GetTempPath()) "VBAPwdRemover_$(Get-Date -Format yyyyMMddHHmmss)"
-    New-Item $tempDir -ItemType Directory -Force | Out-Null
-
+    # Open ZIP in-place (Update mode) - no extract/re-create
+    $zip = [IO.Compression.ZipFile]::Open($path, [IO.Compression.ZipArchiveMode]::Update)
     try {
-        $extractDir = Join-Path $tempDir 'extracted'
-        [IO.Compression.ZipFile]::ExtractToDirectory($path, $extractDir)
+        $entry = $zip.Entries | Where-Object { $_.Name -eq 'vbaProject.bin' } | Select-Object -First 1
+        if (-not $entry) { return $false }
 
-        $vbaProj = Get-ChildItem $extractDir -Recurse -Filter 'vbaProject.bin' | Select-Object -First 1
-        if (-not $vbaProj) { return $false }
+        # Read entry
+        $stream = $entry.Open()
+        $ms = New-Object IO.MemoryStream
+        $stream.CopyTo($ms)
+        $stream.Close()
+        $data = $ms.ToArray()
+        $ms.Close()
 
-        $data = [IO.File]::ReadAllBytes($vbaProj.FullName)
         $pos = Find-DPB $data
         if ($pos -eq -1) { return $false }
-        $data[$pos + 2] = 0x78
-        [IO.File]::WriteAllBytes($vbaProj.FullName, $data)
 
-        Remove-Item $path -Force
-        [IO.Compression.ZipFile]::CreateFromDirectory($extractDir, $path)
+        # Patch DPB= -> DPx=
+        $data[$pos + 2] = 0x78
+
+        # Write back to same entry
+        $stream = $entry.Open()
+        $stream.SetLength(0)
+        $stream.Write($data, 0, $data.Length)
+        $stream.Close()
+
         return $true
     }
     finally {
-        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        $zip.Dispose()
     }
 }
 
