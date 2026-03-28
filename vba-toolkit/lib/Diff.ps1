@@ -149,37 +149,45 @@ Write-Host "Summary: $($parts -join ', ')"
 
 function HtmlEncode([string]$s) { return [System.Net.WebUtility]::HtmlEncode($s) }
 
-$html = [System.Text.StringBuilder]::new()
-[void]$html.Append(@"
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<title>VBA Diff: $([System.Net.WebUtility]::HtmlEncode($nameA)) vs $([System.Net.WebUtility]::HtmlEncode($nameB))</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: Consolas, 'Courier New', monospace; font-size: 13px; background: #1e1e1e; color: #d4d4d4; }
-.header { background: #252526; padding: 10px 20px; border-bottom: 1px solid #3c3c3c; }
-.header h1 { font-size: 15px; font-weight: normal; color: #cccccc; }
-.header .summary { margin-top: 4px; font-size: 12px; color: #888; }
-.main { display: flex; height: calc(100vh - 52px); }
-.sidebar { width: 200px; min-width: 200px; background: #252526; border-right: 1px solid #3c3c3c; overflow-y: auto; padding: 8px 0; }
-.sidebar .item { padding: 5px 16px; cursor: pointer; color: #888; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sidebar .item:hover { color: #d4d4d4; background: #2a2d2e; }
-.sidebar .item.active { color: #ffffff; background: #37373d; border-left: 2px solid #0078d4; }
+# --- Build sidebar ---
+$sidebarSb = [System.Text.StringBuilder]::new()
+$tabIdx = 0
+$firstModifiedIdx = -1
+foreach ($md in $moduleDiffs) {
+    $cls = $md.Status
+    if ($firstModifiedIdx -eq -1 -and $md.Status -ne 'unchanged') { $firstModifiedIdx = $tabIdx }
+    [void]$sidebarSb.Append("<div class=`"item $cls`" onclick=`"showTab($tabIdx)`" id=`"tab$tabIdx`">$(HtmlEncode $md.Name)</div>")
+    $tabIdx++
+}
+if ($firstModifiedIdx -eq -1) { $firstModifiedIdx = 0 }
+
+# --- Build content ---
+$contentSb = [System.Text.StringBuilder]::new()
+$tabIdx = 0
+foreach ($md in $moduleDiffs) {
+    [void]$contentSb.Append("<div class=`"module`" id=`"mod$tabIdx`"><table class=`"diff-table`">")
+    $diff = $md.Diff
+    foreach ($row in $diff) {
+        $type = $row.Type
+        $lnA = if ($row.LineA -ge 0) { $row.LineA + 1 } else { '' }
+        $lnB = if ($row.LineB -ge 0) { $row.LineB + 1 } else { '' }
+        $tA = HtmlEncode $row.TextA
+        $tB = HtmlEncode $row.TextB
+        [void]$contentSb.Append("<tr class=`"$type`"><td class=`"ln ln-a`">$lnA</td><td class=`"code code-a`">$tA</td><td class=`"sep`"></td><td class=`"ln ln-b`">$lnB</td><td class=`"code code-b`">$tB</td></tr>")
+    }
+    [void]$contentSb.Append("</table></div>")
+    $tabIdx++
+}
+
+# --- Diff-specific CSS ---
+$diffCss = @"
 .sidebar .item.modified { color: #e8ab53; }
 .sidebar .item.added { color: #6a9955; }
 .sidebar .item.removed { color: #f44747; }
 .sidebar .item.unchanged { color: #606060; }
-.content { flex: 1; overflow: auto; position: relative; }
-.module { display: none; }
-.module.active { display: block; }
-.minimap { position: fixed; right: 0; top: 52px; width: 14px; bottom: 0; background: #1e1e1e; border-left: 1px solid #3c3c3c; z-index: 20; cursor: pointer; }
-.minimap .mark { position: absolute; right: 2px; width: 10px; height: 3px; border-radius: 1px; }
 .minimap .mark.m-changed { background: #e8ab53; }
 .minimap .mark.m-removed { background: #f44747; }
 .minimap .mark.m-added { background: #6a9955; }
-.minimap .viewport { position: absolute; right: 0; width: 14px; background: rgba(255,255,255,0.25); border-radius: 2px; pointer-events: none; }
 .diff-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .diff-table td { padding: 0 8px; line-height: 20px; vertical-align: top; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .diff-table .ln { width: 45px; min-width: 45px; text-align: right; color: #606060; padding-right: 12px; user-select: none; border-right: 1px solid #3c3c3c; }
@@ -194,116 +202,16 @@ tr.added td.code-a { background: #2d2d2d; color: #606060; }
 tr.added td.code-b { background: #1b3a1b; color: #d7f8d7; }
 tr.changed td.ln, tr.removed td.ln-a, tr.added td.ln-b { color: #cccccc; }
 .unchanged-marker { text-align: center; color: #606060; padding: 4px; background: #252526; font-size: 11px; }
-</style>
-</head>
-<body>
-<div class="header">
-  <h1>VBA Diff</h1>
-  <div class="summary">
-    A: $(HtmlEncode $nameA) &nbsp;&mdash;&nbsp; B: $(HtmlEncode $nameB)
-    &nbsp;&nbsp;|&nbsp;&nbsp;
-    $($parts -join ' &nbsp; ')
-  </div>
-</div>
-<div class="main">
-<div class="sidebar" id="sidebar">
-"@)
+"@
 
-# Sidebar items
-$tabIdx = 0
-$firstModifiedIdx = -1
-foreach ($md in $moduleDiffs) {
-    $cls = $md.Status
-    if ($firstModifiedIdx -eq -1 -and $md.Status -ne 'unchanged') { $firstModifiedIdx = $tabIdx }
-    [void]$html.Append("<div class=`"item $cls`" onclick=`"showTab($tabIdx)`" id=`"tab$tabIdx`">$(HtmlEncode $md.Name)</div>")
-    $tabIdx++
-}
-if ($firstModifiedIdx -eq -1) { $firstModifiedIdx = 0 }
-
-[void]$html.Append("</div><div class=`"content`">")
-
-# Module panels
-$tabIdx = 0
-foreach ($md in $moduleDiffs) {
-    [void]$html.Append("<div class=`"module`" id=`"mod$tabIdx`"><table class=`"diff-table`">")
-
-    $diff = $md.Diff
-    foreach ($row in $diff) {
-        $type = $row.Type
-        $lnA = if ($row.LineA -ge 0) { $row.LineA + 1 } else { '' }
-        $lnB = if ($row.LineB -ge 0) { $row.LineB + 1 } else { '' }
-        $tA = HtmlEncode $row.TextA
-        $tB = HtmlEncode $row.TextB
-        [void]$html.Append("<tr class=`"$type`"><td class=`"ln ln-a`">$lnA</td><td class=`"code code-a`">$tA</td><td class=`"sep`"></td><td class=`"ln ln-b`">$lnB</td><td class=`"code code-b`">$tB</td></tr>")
-    }
-
-    [void]$html.Append("</table></div>")
-    $tabIdx++
-}
-
-[void]$html.Append(@"
-</div>
-<div class="minimap" id="minimap"><div class="viewport" id="viewport"></div></div>
-</div>
-<script>
-const content = document.querySelector('.content');
-const minimap = document.getElementById('minimap');
-const viewport = document.getElementById('viewport');
-
-function showTab(idx) {
-  document.querySelectorAll('.module').forEach(m => m.classList.remove('active'));
-  document.querySelectorAll('.item').forEach(t => t.classList.remove('active'));
-  document.getElementById('mod' + idx).classList.add('active');
-  document.getElementById('tab' + idx).classList.add('active');
-  updateMinimap();
-}
-
-function updateMinimap() {
-  minimap.querySelectorAll('.mark').forEach(m => m.remove());
-  const mod = document.querySelector('.module.active');
-  if (!mod) return;
-  const rows = mod.querySelectorAll('tr.changed, tr.removed, tr.added');
-  const allRows = mod.querySelectorAll('tr');
-  const totalRows = allRows.length;
-  if (totalRows === 0) return;
-  const mapH = minimap.clientHeight;
-  rows.forEach(r => {
-    const idx = Array.from(allRows).indexOf(r);
-    const mark = document.createElement('div');
-    mark.className = 'mark m-' + r.className;
-    mark.style.top = (idx / totalRows * mapH) + 'px';
-    mark.addEventListener('click', () => r.scrollIntoView({block:'center'}));
-    minimap.appendChild(mark);
-  });
-  updateViewport();
-}
-
-function updateViewport() {
-  const sh = content.scrollHeight;
-  const ch = content.clientHeight;
-  const st = content.scrollTop;
-  const mapH = minimap.clientHeight;
-  if (sh <= ch) { viewport.style.display = 'none'; return; }
-  viewport.style.display = '';
-  viewport.style.top = (st / sh * mapH) + 'px';
-  viewport.style.height = (ch / sh * mapH) + 'px';
-}
-
-content.addEventListener('scroll', updateViewport);
-minimap.addEventListener('click', (e) => {
-  if (e.target.classList.contains('mark')) return;
-  const ratio = e.offsetY / minimap.clientHeight;
-  content.scrollTop = ratio * content.scrollHeight - content.clientHeight / 2;
-});
-
-showTab($firstModifiedIdx);
-</script>
-</body></html>
-"@)
+$diffSubtitle = "A: $([System.Net.WebUtility]::HtmlEncode($nameA)) --- B: $([System.Net.WebUtility]::HtmlEncode($nameB))  |  $($parts -join '  ')"
 
 $outDir = New-VbaOutputDir $FileA 'diff'
 $htmlPath = Join-Path $outDir 'diff.html'
-[IO.File]::WriteAllText($htmlPath, $html.ToString(), [System.Text.Encoding]::UTF8)
+
+New-HtmlBase -Title 'VBA Diff' -Subtitle $diffSubtitle `
+    -ExtraCss $diffCss -SidebarHtml $sidebarSb.ToString() -ContentHtml $contentSb.ToString() `
+    -HighlightSelector 'tr.changed, tr.removed, tr.added' -FirstTabIndex $firstModifiedIdx -OutputPath $htmlPath
 
 # Text report
 $textReport = [System.Text.StringBuilder]::new()

@@ -410,11 +410,11 @@ function Save-VbaProjectBytes([string]$filePath, [byte[]]$ole2Bytes, [bool]$isZi
     }
 }
 
-function Get-VbaModuleList($ole2) {
+function Get-VbaModuleList($ole2, [int]$codepage = 932) {
     $projEntry = $ole2.Entries | Where-Object { $_.Name -eq 'PROJECT' -and $_.ObjType -eq 2 } | Select-Object -First 1
     if (-not $projEntry) { return @() }
     $projData = Read-Ole2Stream $ole2 $projEntry
-    $projText = [System.Text.Encoding]::GetEncoding(932).GetString($projData)
+    $projText = [System.Text.Encoding]::GetEncoding($codepage).GetString($projData)
     $modules = [System.Collections.ArrayList]::new()
     foreach ($line in $projText -split "`r`n|`n") {
         if ($line -match '^Module=(.+)$') { [void]$modules.Add(@{ Name = $Matches[1]; Ext = 'bas' }) }
@@ -425,7 +425,7 @@ function Get-VbaModuleList($ole2) {
     return ,$modules
 }
 
-function Get-VbaModuleCode($ole2, [string]$moduleName) {
+function Get-VbaModuleCode($ole2, [string]$moduleName, [int]$codepage = 932) {
     $streamEntry = $ole2.Entries | Where-Object { $_.Name -eq $moduleName -and $_.ObjType -eq 2 } | Select-Object -First 1
     if (-not $streamEntry) {
         $streamEntry = $ole2.Entries | Where-Object { $_.Name -ieq $moduleName -and $_.ObjType -eq 2 } | Select-Object -First 1
@@ -438,7 +438,7 @@ function Get-VbaModuleCode($ole2, [string]$moduleName) {
             if ((($hdr -shr 12) -band 0x07) -eq 3) {
                 $code = Decompress-VBA $streamData $tryOff
                 if ($code.Length -gt 0) {
-                    $text = [System.Text.Encoding]::GetEncoding(932).GetString($code)
+                    $text = [System.Text.Encoding]::GetEncoding($codepage).GetString($code)
                     if ($text -match 'Attribute\s+VB_Name') {
                         return @{ Code = $text; Offset = $tryOff; Entry = $streamEntry; StreamData = $streamData }
                     }
@@ -450,32 +450,31 @@ function Get-VbaModuleCode($ole2, [string]$moduleName) {
 }
 
 # ============================================================================
-# HTML Code Viewer (shared by Extract, Sanitize)
+# HTML Base Template (shared dark-theme shell: CSS, sidebar, content, minimap, JS)
 # ============================================================================
 
-# $moduleData: ordered hashtable of name -> @{ Ext; Lines = string[]; Highlights = @{ lineIndex -> cssClass } }
-# $highlightLabel: e.g. "EDR Detection" or "Sanitized"
-function New-HtmlCodeView {
+function New-HtmlBase {
     param(
-        [string]$title,
-        [string]$subtitle,
-        [System.Collections.Specialized.OrderedDictionary]$moduleData,
-        [string]$highlightClass,   # CSS class for highlighted lines (e.g. 'hl-edr', 'hl-sanitized')
-        [string]$highlightColor,   # CSS color (e.g. '#1b3a5c' for blue, '#4b3a00' for yellow)
-        [string]$highlightText,    # CSS text color
-        [string]$markerColor,      # minimap marker color
-        [string]$outputPath
+        [string]$Title,
+        [string]$Subtitle,
+        [string]$ExtraCss = '',           # additional CSS rules
+        [string]$SidebarHtml = '',        # sidebar inner HTML
+        [string]$ContentHtml = '',        # content area inner HTML
+        [string]$ExtraHtml = '',          # extra HTML inside .main after .content (e.g. outline, tooltip divs)
+        [string]$ExtraJs = '',            # additional JS code
+        [string]$HighlightSelector = '',  # CSS selector for minimap marks (e.g. 'tr.hl-edr')
+        [int]$FirstTabIndex = 0,          # initial tab to show
+        [string]$OutputPath               # file path to write
     )
 
     $he = { param($s) [System.Net.WebUtility]::HtmlEncode($s) }
 
-    $html = [System.Text.StringBuilder]::new()
-    [void]$html.Append(@"
+    $html = @"
 <!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>$(& $he $title)</title>
+<title>$(& $he $Title)</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: Consolas, 'Courier New', monospace; font-size: 13px; background: #1e1e1e; color: #d4d4d4; }
@@ -487,65 +486,30 @@ body { font-family: Consolas, 'Courier New', monospace; font-size: 13px; backgro
 .sidebar .item { padding: 5px 16px; cursor: pointer; color: #888; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sidebar .item:hover { color: #d4d4d4; background: #2a2d2e; }
 .sidebar .item.active { color: #ffffff; background: #37373d; border-left: 2px solid #0078d4; }
-.sidebar .item.has-hl { color: $markerColor; }
-.sidebar .item.no-hl { color: #606060; }
 .content { flex: 1; overflow: auto; position: relative; }
 .module { display: none; }
 .module.active { display: block; }
-.code-table { width: 100%; border-collapse: collapse; }
-.code-table td { padding: 0 8px; line-height: 20px; vertical-align: top; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
-.code-table .ln { width: 50px; min-width: 50px; text-align: right; color: #606060; padding-right: 12px; user-select: none; border-right: 1px solid #3c3c3c; }
-.code-table .code { color: #d4d4d4; }
-tr.$highlightClass td.code { background: $highlightColor; color: $highlightText; }
-tr.$highlightClass td.ln { color: #cccccc; }
 .minimap { position: fixed; right: 0; top: 52px; width: 14px; bottom: 0; background: #1e1e1e; border-left: 1px solid #3c3c3c; z-index: 20; cursor: pointer; }
-.minimap .mark { position: absolute; right: 2px; width: 10px; height: 3px; border-radius: 1px; background: $markerColor; }
+.minimap .mark { position: absolute; right: 2px; width: 10px; height: 3px; border-radius: 1px; }
 .minimap .viewport { position: absolute; right: 0; width: 14px; background: rgba(255,255,255,0.25); border-radius: 2px; pointer-events: none; }
+$ExtraCss
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>$(& $he $title)</h1>
-  <div class="sub">$(& $he $subtitle)</div>
+  <h1>$(& $he $Title)</h1>
+  <div class="sub">$(& $he $Subtitle)</div>
 </div>
 <div class="main">
 <div class="sidebar" id="sidebar">
-"@)
-
-    $tabIdx = 0; $firstHlIdx = -1
-    foreach ($modName in $moduleData.Keys) {
-        $md = $moduleData[$modName]
-        $hlCount = 0
-        if ($md.Highlights) { $hlCount = $md.Highlights.Count }
-        $cls = if ($hlCount -gt 0) { 'has-hl' } else { 'no-hl' }
-        if ($firstHlIdx -eq -1 -and $hlCount -gt 0) { $firstHlIdx = $tabIdx }
-        $label = "$modName.$($md.Ext)"
-        if ($hlCount -gt 0) { $label += " ($hlCount)" }
-        [void]$html.Append("<div class=`"item $cls`" onclick=`"showTab($tabIdx)`" id=`"tab$tabIdx`">$(& $he $label)</div>")
-        $tabIdx++
-    }
-    if ($firstHlIdx -eq -1) { $firstHlIdx = 0 }
-
-    [void]$html.Append("</div><div class=`"content`">")
-
-    $tabIdx = 0
-    foreach ($modName in $moduleData.Keys) {
-        $md = $moduleData[$modName]
-        [void]$html.Append("<div class=`"module`" id=`"mod$tabIdx`"><table class=`"code-table`">")
-        for ($i = 0; $i -lt $md.Lines.Count; $i++) {
-            $trClass = ''
-            if ($md.Highlights -and $md.Highlights.ContainsKey($i)) { $trClass = $highlightClass }
-            $ln = $i + 1
-            $code = & $he $md.Lines[$i]
-            [void]$html.Append("<tr class=`"$trClass`"><td class=`"ln`">$ln</td><td class=`"code`">$code</td></tr>")
-        }
-        [void]$html.Append("</table></div>")
-        $tabIdx++
-    }
-
-    [void]$html.Append(@"
+$SidebarHtml
+</div>
+<div class="content" id="content">
+$ContentHtml
 <div class="minimap" id="minimap"><div class="viewport" id="viewport"></div></div>
-</div></div>
+</div>
+$ExtraHtml
+</div>
 <script>
 const content = document.querySelector('.content');
 const minimap = document.getElementById('minimap');
@@ -553,22 +517,27 @@ const viewport = document.getElementById('viewport');
 function showTab(idx) {
   document.querySelectorAll('.module').forEach(m => m.classList.remove('active'));
   document.querySelectorAll('.item').forEach(t => t.classList.remove('active'));
-  document.getElementById('mod' + idx).classList.add('active');
-  document.getElementById('tab' + idx).classList.add('active');
+  var modEl = document.getElementById('mod' + idx);
+  var tabEl = document.getElementById('tab' + idx);
+  if (modEl) modEl.classList.add('active');
+  if (tabEl) tabEl.classList.add('active');
+  content.scrollTop = 0;
   updateMinimap();
 }
 function updateMinimap() {
   minimap.querySelectorAll('.mark').forEach(m => m.remove());
   const mod = document.querySelector('.module.active');
   if (!mod) return;
-  const rows = mod.querySelectorAll('tr.$highlightClass');
+  const hlSelector = '$HighlightSelector';
+  if (!hlSelector) return;
+  const rows = mod.querySelectorAll(hlSelector);
   const allRows = mod.querySelectorAll('tr');
   if (allRows.length === 0) return;
   const mapH = minimap.clientHeight;
   rows.forEach(r => {
     const idx = Array.from(allRows).indexOf(r);
     const mark = document.createElement('div');
-    mark.className = 'mark';
+    mark.className = 'mark' + (r.className ? ' m-' + r.className.split(' ')[0] : '');
     mark.style.top = (idx / allRows.length * mapH) + 'px';
     mark.addEventListener('click', () => r.scrollIntoView({block:'center'}));
     minimap.appendChild(mark);
@@ -588,12 +557,83 @@ minimap.addEventListener('click', (e) => {
   if (e.target.classList.contains('mark')) return;
   content.scrollTop = e.offsetY / minimap.clientHeight * content.scrollHeight - content.clientHeight / 2;
 });
-showTab($firstHlIdx);
+$ExtraJs
+showTab($FirstTabIndex);
 </script>
 </body></html>
-"@)
+"@
 
-    [IO.File]::WriteAllText($outputPath, $html.ToString(), [System.Text.Encoding]::UTF8)
+    [IO.File]::WriteAllText($OutputPath, $html, [System.Text.Encoding]::UTF8)
+}
+
+# ============================================================================
+# HTML Code Viewer (shared by Extract, Sanitize) — delegates to New-HtmlBase
+# ============================================================================
+
+# $moduleData: ordered hashtable of name -> @{ Ext; Lines = string[]; Highlights = @{ lineIndex -> cssClass } }
+function New-HtmlCodeView {
+    param(
+        [string]$title,
+        [string]$subtitle,
+        [System.Collections.Specialized.OrderedDictionary]$moduleData,
+        [string]$highlightClass,   # CSS class for highlighted lines (e.g. 'hl-edr', 'hl-sanitized')
+        [string]$highlightColor,   # CSS color (e.g. '#1b3a5c' for blue, '#4b3a00' for yellow)
+        [string]$highlightText,    # CSS text color
+        [string]$markerColor,      # minimap marker color
+        [string]$outputPath
+    )
+
+    $he = { param($s) [System.Net.WebUtility]::HtmlEncode($s) }
+
+    # --- Extra CSS ---
+    $extraCss = @"
+.sidebar .item.has-hl { color: $markerColor; }
+.sidebar .item.no-hl { color: #606060; }
+.code-table { width: 100%; border-collapse: collapse; }
+.code-table td { padding: 0 8px; line-height: 20px; vertical-align: top; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.code-table .ln { width: 50px; min-width: 50px; text-align: right; color: #606060; padding-right: 12px; user-select: none; border-right: 1px solid #3c3c3c; }
+.code-table .code { color: #d4d4d4; }
+tr.$highlightClass td.code { background: $highlightColor; color: $highlightText; }
+tr.$highlightClass td.ln { color: #cccccc; }
+.minimap .mark { background: $markerColor; }
+"@
+
+    # --- Sidebar ---
+    $sidebarSb = [System.Text.StringBuilder]::new()
+    $tabIdx = 0; $firstHlIdx = -1
+    foreach ($modName in $moduleData.Keys) {
+        $md = $moduleData[$modName]
+        $hlCount = 0
+        if ($md.Highlights) { $hlCount = $md.Highlights.Count }
+        $cls = if ($hlCount -gt 0) { 'has-hl' } else { 'no-hl' }
+        if ($firstHlIdx -eq -1 -and $hlCount -gt 0) { $firstHlIdx = $tabIdx }
+        $label = "$modName.$($md.Ext)"
+        if ($hlCount -gt 0) { $label += " ($hlCount)" }
+        [void]$sidebarSb.Append("<div class=`"item $cls`" onclick=`"showTab($tabIdx)`" id=`"tab$tabIdx`">$(& $he $label)</div>")
+        $tabIdx++
+    }
+    if ($firstHlIdx -eq -1) { $firstHlIdx = 0 }
+
+    # --- Content ---
+    $contentSb = [System.Text.StringBuilder]::new()
+    $tabIdx = 0
+    foreach ($modName in $moduleData.Keys) {
+        $md = $moduleData[$modName]
+        [void]$contentSb.Append("<div class=`"module`" id=`"mod$tabIdx`"><table class=`"code-table`">")
+        for ($i = 0; $i -lt $md.Lines.Count; $i++) {
+            $trClass = ''
+            if ($md.Highlights -and $md.Highlights.ContainsKey($i)) { $trClass = $highlightClass }
+            $ln = $i + 1
+            $code = & $he $md.Lines[$i]
+            [void]$contentSb.Append("<tr class=`"$trClass`"><td class=`"ln`">$ln</td><td class=`"code`">$code</td></tr>")
+        }
+        [void]$contentSb.Append("</table></div>")
+        $tabIdx++
+    }
+
+    New-HtmlBase -Title $title -Subtitle $subtitle `
+        -ExtraCss $extraCss -SidebarHtml $sidebarSb.ToString() -ContentHtml $contentSb.ToString() `
+        -HighlightSelector "tr.$highlightClass" -FirstTabIndex $firstHlIdx -OutputPath $outputPath
 }
 
 # ============================================================================
@@ -706,10 +746,10 @@ function Get-AllModuleCode {
     $ole2 = Read-Ole2 $proj.Bytes
     $codepage = Get-VbaCodepage $ole2
     $encoding = [System.Text.Encoding]::GetEncoding($codepage)
-    $modules = Get-VbaModuleList $ole2
+    $modules = Get-VbaModuleList $ole2 $codepage
     $result = [ordered]@{}
     foreach ($mod in $modules) {
-        $mc = Get-VbaModuleCode $ole2 $mod.Name
+        $mc = Get-VbaModuleCode $ole2 $mod.Name $codepage
         if (-not $mc) { continue }
         $rawBytes = Decompress-VBA $mc.StreamData $mc.Offset
         $code = $encoding.GetString($rawBytes)
@@ -836,7 +876,7 @@ Export-ModuleMember -Function Read-Ole2, Read-Ole2Stream, Write-Ole2Stream,
     Decompress-VBA, Compress-VBA,
     Get-VbaProjectBytes, Save-VbaProjectBytes,
     Get-VbaModuleList, Get-VbaModuleCode,
-    New-HtmlCodeView,
+    New-HtmlBase, New-HtmlCodeView,
     Resolve-VbaFilePath, New-VbaOutputDir,
     Write-VbaLog, Write-VbaStatus, Write-VbaResult, Write-VbaError, Write-VbaHeader,
     Get-VbaCodepage, Get-AllModuleCode, Get-VbaAnalysis

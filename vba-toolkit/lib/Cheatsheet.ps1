@@ -448,29 +448,58 @@ foreach ($apiName in $allApiNames) {
     $tooltipData[$apiName] = @{ Alt = $alt; Note = $note; Example = $example }
 }
 
-$html = [System.Text.StringBuilder]::new()
-[void]$html.Append(@"
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<title>Cheatsheet: $([System.Net.WebUtility]::HtmlEncode([IO.Path]::GetFileName($FilePath)))</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: Consolas, 'Courier New', monospace; font-size: 13px; background: #1e1e1e; color: #d4d4d4; }
-.header { background: #252526; padding: 10px 20px; border-bottom: 1px solid #3c3c3c; }
-.header h1 { font-size: 15px; font-weight: normal; color: #cccccc; }
-.header .sub { margin-top: 4px; font-size: 12px; color: #888; }
-.main { display: flex; height: calc(100vh - 52px); }
-.sidebar { width: 200px; min-width: 200px; background: #252526; border-right: 1px solid #3c3c3c; overflow-y: auto; padding: 8px 0; }
-.sidebar .item { padding: 5px 16px; cursor: pointer; color: #888; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sidebar .item:hover { color: #d4d4d4; background: #2a2d2e; }
-.sidebar .item.active { color: #ffffff; background: #37373d; border-left: 2px solid #0078d4; }
+# --- Sidebar ---
+$sidebarSb = [System.Text.StringBuilder]::new()
+$modIdx = 0
+$firstHlIdx = -1
+foreach ($modLabel in $allModCode.Keys) {
+    $lines = $allModCode[$modLabel]
+    $hlCount = 0
+    foreach ($line in $lines) {
+        if ($line -match '^\s*''') { continue }
+        foreach ($apiName in $allApiNames) {
+            if ($line -match "\b$([regex]::Escape($apiName))\b") { $hlCount++; break }
+        }
+    }
+    $cls = if ($hlCount -gt 0) { 'has-hl' } else { 'no-hl' }
+    if ($firstHlIdx -eq -1 -and $hlCount -gt 0) { $firstHlIdx = $modIdx }
+    $label = if ($hlCount -gt 0) { "$modLabel ($hlCount)" } else { $modLabel }
+    [void]$sidebarSb.Append("<div class=`"item $cls`" onclick=`"showTab($modIdx)`" id=`"tab$modIdx`">$(& $he $label)</div>")
+    $modIdx++
+}
+if ($firstHlIdx -eq -1) { $firstHlIdx = 0 }
+
+# --- Content ---
+$contentSb = [System.Text.StringBuilder]::new()
+$modIdx = 0
+foreach ($modLabel in $allModCode.Keys) {
+    $lines = $allModCode[$modLabel]
+    [void]$contentSb.Append("<div class=`"module`" id=`"mod$modIdx`"><table class=`"code-table`">")
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        $trClass = ''
+        $dataApi = ''
+        if ($line -notmatch '^\s*''') {
+            foreach ($apiName in $allApiNames) {
+                if ($line -match "\b$([regex]::Escape($apiName))\b") {
+                    $trClass = 'hl-api'
+                    $dataApi = $apiName
+                    break
+                }
+            }
+        }
+        $ln = $i + 1
+        $dataAttr = if ($dataApi) { " data-api=`"$(& $he $dataApi)`"" } else { '' }
+        [void]$contentSb.Append("<tr class=`"$trClass`"$dataAttr><td class=`"ln`">$ln</td><td class=`"code`">$(& $he $line)</td></tr>")
+    }
+    [void]$contentSb.Append("</table></div>")
+    $modIdx++
+}
+
+# --- Cheatsheet-specific CSS ---
+$cheatCss = @"
 .sidebar .item.has-hl { color: #4fc1ff; }
 .sidebar .item.no-hl { color: #606060; }
-.content { flex: 1; overflow: auto; position: relative; }
-.module { display: none; }
-.module.active { display: block; }
 .code-table { width: 100%; border-collapse: collapse; }
 .code-table td { padding: 0 8px; line-height: 20px; vertical-align: top; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .code-table .ln { width: 50px; min-width: 50px; text-align: right; color: #606060; padding-right: 12px; user-select: none; border-right: 1px solid #3c3c3c; }
@@ -493,87 +522,20 @@ tr.hl-api td.ln { color: #cccccc; }
 .tooltip .tt-copy { position: absolute; top: 6px; right: 6px; background: none; border: none; cursor: pointer; opacity: 0.5; padding: 2px; }
 .tooltip .tt-copy:hover { opacity: 1; }
 .tooltip .tt-copy svg { width: 14px; height: 14px; fill: #ccc; }
-.minimap { position: fixed; right: 250px; top: 52px; width: 14px; bottom: 0; background: #1e1e1e; border-left: 1px solid #3c3c3c; z-index: 20; cursor: pointer; }
-.minimap .mark { position: absolute; right: 2px; width: 10px; height: 3px; border-radius: 1px; background: #4fc1ff; }
-.minimap .viewport { position: absolute; right: 0; width: 14px; background: rgba(255,255,255,0.25); border-radius: 2px; pointer-events: none; }
-</style>
-</head>
-<body>
-<div class="header">
-  <h1>Win32 API Cheatsheet</h1>
-  <div class="sub">$([System.Net.WebUtility]::HtmlEncode([IO.Path]::GetFileName($FilePath))) &mdash; $($found.Count) API(s) detected</div>
-</div>
-<div class="main">
-<div class="sidebar">
-"@)
+.minimap { right: 250px; }
+.minimap .mark { background: #4fc1ff; }
+"@
 
-# Sidebar: modules
-$modIdx = 0
-$firstHlIdx = -1
-foreach ($modLabel in $allModCode.Keys) {
-    $lines = $allModCode[$modLabel]
-    $hlCount = 0
-    foreach ($line in $lines) {
-        if ($line -match '^\s*''') { continue }
-        foreach ($apiName in $allApiNames) {
-            if ($line -match "\b$([regex]::Escape($apiName))\b") { $hlCount++; break }
-        }
-    }
-    $cls = if ($hlCount -gt 0) { 'has-hl' } else { 'no-hl' }
-    if ($firstHlIdx -eq -1 -and $hlCount -gt 0) { $firstHlIdx = $modIdx }
-    $label = if ($hlCount -gt 0) { "$modLabel ($hlCount)" } else { $modLabel }
-    [void]$html.Append("<div class=`"item $cls`" onclick=`"showTab($modIdx)`" id=`"tab$modIdx`">$(& $he $label)</div>")
-    $modIdx++
-}
-if ($firstHlIdx -eq -1) { $firstHlIdx = 0 }
-
-[void]$html.Append("</div><div class=`"content`">")
-
-# Module panels
-$modIdx = 0
-foreach ($modLabel in $allModCode.Keys) {
-    $lines = $allModCode[$modLabel]
-    [void]$html.Append("<div class=`"module`" id=`"mod$modIdx`"><table class=`"code-table`">")
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        $trClass = ''
-        $dataApi = ''
-        if ($line -notmatch '^\s*''') {
-            foreach ($apiName in $allApiNames) {
-                if ($line -match "\b$([regex]::Escape($apiName))\b") {
-                    $trClass = 'hl-api'
-                    $dataApi = $apiName
-                    break
-                }
-            }
-        }
-        $ln = $i + 1
-        $dataAttr = if ($dataApi) { " data-api=`"$(& $he $dataApi)`"" } else { '' }
-        [void]$html.Append("<tr class=`"$trClass`"$dataAttr><td class=`"ln`">$ln</td><td class=`"code`">$(& $he $line)</td></tr>")
-    }
-    [void]$html.Append("</table></div>")
-    $modIdx++
-}
-
-[void]$html.Append(@"
-<div class="minimap" id="minimap"><div class="viewport" id="viewport"></div></div>
-</div>
+# --- Extra HTML (outline panel, tooltip, hover hint — all inside .main) ---
+$extraHtml = @"
 <div class="outline" id="outline"></div>
-</div>
 <div class="tooltip" id="tooltip"></div>
 <div class="hover-hint" id="hoverHint">Click for details</div>
-<script>
-const content = document.querySelector('.content');
-const minimap = document.getElementById('minimap');
-const viewport = document.getElementById('viewport');
-const outline = document.getElementById('outline');
-const tooltip = document.getElementById('tooltip');
-const hoverHint = document.getElementById('hoverHint');
+"@
 
-const apiInfo = {
-"@)
-
-# Emit API info as JS object
+# --- Build API info JS object ---
+$apiInfoSb = [System.Text.StringBuilder]::new()
+[void]$apiInfoSb.Append("const outline = document.getElementById('outline');`nconst tooltip = document.getElementById('tooltip');`nconst hoverHint = document.getElementById('hoverHint');`nconst apiInfo = {")
 $first = $true
 foreach ($apiName in $allApiNames) {
     $info = $tooltipData[$apiName]
@@ -584,21 +546,20 @@ foreach ($apiName in $allApiNames) {
     $exJs = $exJs -replace "('[^<]*)$", '<span class="cmt">$1</span>'
     $comma = if ($first) { '' } else { ',' }
     $first = $false
-    [void]$html.Append("$comma'$(& $he $apiName)':{alt:'$altJs',note:'$noteJs',ex:'$exJs'}")
+    [void]$apiInfoSb.Append("$comma'$(& $he $apiName)':{alt:'$altJs',note:'$noteJs',ex:'$exJs'}")
 }
+[void]$apiInfoSb.Append("};")
 
-[void]$html.Append(@"
-};
+# --- Cheatsheet-specific JS ---
+$cheatJs = @"
+$($apiInfoSb.ToString())
 
-function showTab(idx) {
-  document.querySelectorAll('.module').forEach(m => m.classList.remove('active'));
-  document.querySelectorAll('.item').forEach(t => t.classList.remove('active'));
-  document.getElementById('mod' + idx).classList.add('active');
-  document.getElementById('tab' + idx).classList.add('active');
-  content.scrollTop = 0;
+// Override showTab to also update outline
+var _baseShowTab = showTab;
+showTab = function(idx) {
+  _baseShowTab(idx);
   updateOutline();
-  updateMinimap();
-}
+};
 
 function scrollToRow(r) {
   const rRect = r.getBoundingClientRect();
@@ -635,7 +596,6 @@ function updateOutline() {
   });
 }
 
-// Tooltip: click to pin, click again or X to close
 let pinnedTooltip = null;
 function showTooltipAt(tr) {
   const api = tr.dataset.api;
@@ -686,46 +646,16 @@ content.addEventListener('click', (e) => {
     showTooltipAt(tr);
   }
 });
-
-function updateMinimap() {
-  minimap.querySelectorAll('.mark').forEach(m => m.remove());
-  const mod = document.querySelector('.module.active');
-  if (!mod) return;
-  const rows = mod.querySelectorAll('tr.hl-api');
-  const allRows = mod.querySelectorAll('tr');
-  if (allRows.length === 0) return;
-  const mapH = minimap.clientHeight;
-  rows.forEach(r => {
-    const idx = Array.from(allRows).indexOf(r);
-    const mark = document.createElement('div');
-    mark.className = 'mark';
-    mark.style.top = (idx / allRows.length * mapH) + 'px';
-    mark.addEventListener('click', () => scrollToRow(r));
-    minimap.appendChild(mark);
-  });
-  updateViewport();
-}
-function updateViewport() {
-  const sh = content.scrollHeight, ch = content.clientHeight, st = content.scrollTop;
-  const mapH = minimap.clientHeight;
-  if (sh <= ch) { viewport.style.display = 'none'; return; }
-  viewport.style.display = '';
-  viewport.style.top = (st / sh * mapH) + 'px';
-  viewport.style.height = (ch / sh * mapH) + 'px';
-}
-content.addEventListener('scroll', updateViewport);
-minimap.addEventListener('click', (e) => {
-  if (e.target.classList.contains('mark')) return;
-  content.scrollTop = e.offsetY / minimap.clientHeight * content.scrollHeight - content.clientHeight / 2;
-});
-showTab($firstHlIdx);
-</script>
-</body></html>
-"@)
+"@
 
 $outDir = New-VbaOutputDir $FilePath 'cheatsheet'
 $htmlPath = Join-Path $outDir 'cheatsheet.html'
-[IO.File]::WriteAllText($htmlPath, $html.ToString(), [System.Text.Encoding]::UTF8)
+
+New-HtmlBase -Title 'Win32 API Cheatsheet' `
+    -Subtitle "$([System.Net.WebUtility]::HtmlEncode([IO.Path]::GetFileName($FilePath))) --- $($found.Count) API(s) detected" `
+    -ExtraCss $cheatCss -SidebarHtml $sidebarSb.ToString() -ContentHtml $contentSb.ToString() `
+    -ExtraHtml $extraHtml -ExtraJs $cheatJs `
+    -HighlightSelector 'tr.hl-api' -FirstTabIndex $firstHlIdx -OutputPath $htmlPath
 
 # Text log
 $text = [System.Text.StringBuilder]::new()
