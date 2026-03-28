@@ -151,6 +151,116 @@ foreach ($cat in $patterns.Keys) {
     }
 }
 
+# ============================================================================
+# Detailed usage trace: COM objects and Win32 API call sites
+# ============================================================================
+
+# Collect all code as lines per file
+$allCode = @{}
+foreach ($f in $allFiles) {
+    $allCode[$f.Name] = ([IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)) -split "`r`n|`n"
+}
+
+# --- COM object usage trace ---
+# 1. Find Set <var> = CreateObject("<progid>") or GetObject(...)
+# 2. Track <var>.method calls across all modules
+$comBindings = [System.Collections.ArrayList]::new()  # @{ ProgId; VarName; File; Line }
+foreach ($f in $allFiles) {
+    $lines = $allCode[$f.Name]
+    for ($li = 0; $li -lt $lines.Count; $li++) {
+        $line = $lines[$li]
+        if ($line -match '^\s*''') { continue }
+        if ($line -match '\bSet\s+(\w+)\s*=\s*CreateObject\s*\(\s*"([^"]+)"') {
+            [void]$comBindings.Add(@{ VarName = $Matches[1]; ProgId = $Matches[2]; File = $f.Name; Line = $li + 1 })
+        }
+        elseif ($line -match '\bSet\s+(\w+)\s*=\s*GetObject\s*\(') {
+            [void]$comBindings.Add(@{ VarName = $Matches[1]; ProgId = '(GetObject)'; File = $f.Name; Line = $li + 1 })
+        }
+        # Also catch: CreateObject without Set (function return)
+        elseif ($line -match '(\w+)\.(\w+).*CreateObject\s*\(\s*"([^"]+)"' -and $line -notmatch '^\s*Set\s') {
+            # inline usage like: CreateObject("...").Method
+        }
+    }
+}
+
+if ($comBindings.Count -gt 0) {
+    [void]$report.AppendLine("## COM Object Usage Details")
+    [void]$report.AppendLine("")
+
+    $grouped = $comBindings | Group-Object { $_.ProgId } | Sort-Object Name
+    foreach ($g in $grouped) {
+        [void]$report.AppendLine("  $($g.Name)")
+        foreach ($b in $g.Group) {
+            [void]$report.AppendLine("    $($b.File) L$($b.Line): Set $($b.VarName) = ...")
+        }
+
+        # Find all method/property calls on these variable names across all files
+        $varNames = ($g.Group | ForEach-Object { $_.VarName }) | Sort-Object -Unique
+        $methodCalls = [System.Collections.ArrayList]::new()
+        foreach ($fn in $allCode.Keys) {
+            $lines = $allCode[$fn]
+            for ($li = 0; $li -lt $lines.Count; $li++) {
+                $line = $lines[$li]
+                if ($line -match '^\s*''') { continue }
+                foreach ($vn in $varNames) {
+                    if ($line -match "\b$([regex]::Escape($vn))\.(\w+)") {
+                        $method = $Matches[1]
+                        $trimmed = $line.Trim()
+                        if ($trimmed.Length -gt 80) { $trimmed = $trimmed.Substring(0, 77) + '...' }
+                        $entry = "$fn L$($li+1): .$method  -- $trimmed"
+                        if ($methodCalls -notcontains $entry) { [void]$methodCalls.Add($entry) }
+                    }
+                }
+            }
+        }
+        if ($methodCalls.Count -gt 0) {
+            foreach ($mc in $methodCalls) { [void]$report.AppendLine("    $mc") }
+        }
+        [void]$report.AppendLine("")
+    }
+}
+
+# --- Win32 API usage trace ---
+$apiDecls = [System.Collections.ArrayList]::new()  # @{ Name; File; Line; Signature }
+foreach ($f in $allFiles) {
+    $lines = $allCode[$f.Name]
+    for ($li = 0; $li -lt $lines.Count; $li++) {
+        $line = $lines[$li]
+        if ($line -match '^\s*''') { continue }
+        if ($line -match '(?i)\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)\s+Lib\s+(.*)') {
+            $trimmed = $line.Trim()
+            if ($trimmed.Length -gt 100) { $trimmed = $trimmed.Substring(0, 97) + '...' }
+            [void]$apiDecls.Add(@{ Name = $Matches[3]; File = $f.Name; Line = $li + 1; Sig = $trimmed })
+        }
+    }
+}
+
+if ($apiDecls.Count -gt 0) {
+    [void]$report.AppendLine("## Win32 API Usage Details")
+    [void]$report.AppendLine("")
+
+    foreach ($api in $apiDecls) {
+        [void]$report.AppendLine("  $($api.Name)")
+        [void]$report.AppendLine("    $($api.File) L$($api.Line): $($api.Sig)")
+
+        # Find call sites across all files
+        foreach ($fn in $allCode.Keys) {
+            $lines = $allCode[$fn]
+            for ($li = 0; $li -lt $lines.Count; $li++) {
+                $line = $lines[$li]
+                if ($line -match '^\s*''') { continue }
+                if ($line -match '(?i)\bDeclare\s') { continue }  # skip the declaration itself
+                if ($line -match "\b$([regex]::Escape($api.Name))\b") {
+                    $trimmed = $line.Trim()
+                    if ($trimmed.Length -gt 80) { $trimmed = $trimmed.Substring(0, 77) + '...' }
+                    [void]$report.AppendLine("    $fn L$($li+1): $trimmed")
+                }
+            }
+        }
+        [void]$report.AppendLine("")
+    }
+}
+
 # External references
 $projEntry2 = $ole2.Entries | Where-Object { $_.Name -eq 'PROJECT' -and $_.ObjType -eq 2 } | Select-Object -First 1
 if ($projEntry2) {
