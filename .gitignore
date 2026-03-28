@@ -3,3 +3,9 @@
 *.xls
 ~$*
 *_vba/
+*_combined.txt
+*_sanitized.txt
+*_diff.txt
+
+# Allow test fixtures
+!vba-toolkit/test/*.xlsm
