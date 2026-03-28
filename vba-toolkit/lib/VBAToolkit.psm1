@@ -63,7 +63,7 @@ public static class VbaToolkitNative
             bool isCompressed = (header & 0x8000) != 0;
             if (!isCompressed)
             {
-                int toCopy = Math.Min(4096, data.Length - pos);
+                int toCopy = Math.Min(chunkSize - 2, data.Length - pos);
                 for (int c = 0; c < toCopy; c++) result.Add(data[pos + c]);
                 pos += toCopy;
                 continue;
@@ -317,10 +317,12 @@ function Write-Ole2Stream([byte[]]$ole2Bytes, $ole2, $entry, [byte[]]$newData) {
             [Array]::Copy($ole2.MiniStreamData, $written2, $ole2Bytes, $off2, [Math]::Min($sectorSize, $ole2.MiniStreamData.Length - $written2))
             $written2 += $sectorSize; $s2 = $fat[$s2]
         }
-        # Validate mini stream write
-        $actualWritten = [Math]::Min($written, $newData.Length)
-        if ($actualWritten -lt $newData.Length) {
-            throw "Write-Ole2Stream: data truncated (mini stream). Wrote $actualWritten of $($newData.Length) bytes. Sector chain too short."
+        # Validate: count sectors actually used
+        $chainLen = 0; $sv = $entry.Start
+        while ($sv -ge 0 -and $sv -ne -2) { $chainLen++; $sv = if ($sv -lt $miniFat.Length) { $miniFat[$sv] } else { -1 } }
+        $chainCapacity = $chainLen * $miniSectorSize
+        if ($newData.Length -gt $chainCapacity) {
+            throw "Write-Ole2Stream: data truncated (mini stream). Data=$($newData.Length) bytes, chain capacity=$chainCapacity bytes."
         }
     } else {
         $s = $entry.Start; $written = 0; $visited = @{}
@@ -334,10 +336,12 @@ function Write-Ole2Stream([byte[]]$ole2Bytes, $ole2, $entry, [byte[]]$newData) {
             }
             $written += $sectorSize; $s = $fat[$s]
         }
-        # Validate write
-        $actualWritten = [Math]::Min($written, $newData.Length)
-        if ($actualWritten -lt $newData.Length) {
-            throw "Write-Ole2Stream: data truncated. Wrote $actualWritten of $($newData.Length) bytes. Sector chain too short."
+        # Validate: count sectors actually used
+        $chainLen = 0; $sv = $entry.Start; $visitedV = @{}
+        while ($sv -ge 0 -and $sv -ne -2 -and -not $visitedV.ContainsKey($sv)) { $visitedV[$sv]=$true; $chainLen++; $sv = $fat[$sv] }
+        $chainCapacity = $chainLen * $sectorSize
+        if ($newData.Length -gt $chainCapacity) {
+            throw "Write-Ole2Stream: data truncated. Data=$($newData.Length) bytes, chain capacity=$chainCapacity bytes."
         }
     }
 
@@ -707,12 +711,8 @@ function Get-AllModuleCode {
     foreach ($mod in $modules) {
         $mc = Get-VbaModuleCode $ole2 $mod.Name
         if (-not $mc) { continue }
-        $code = $encoding.GetString((Decompress-VBA $mc.StreamData $mc.Offset))
-        # Re-decode with detected codepage if different from what Get-VbaModuleCode used
-        if ($codepage -ne 932) {
-            $rawBytes = Decompress-VBA $mc.StreamData $mc.Offset
-            $code = $encoding.GetString($rawBytes)
-        }
+        $rawBytes = Decompress-VBA $mc.StreamData $mc.Offset
+        $code = $encoding.GetString($rawBytes)
         $lines = $code -split "`r`n|`n"
         if ($StripAttributes) {
             $lines = @($lines | Where-Object { $_ -notmatch '^\s*Attribute\s+VB_' })
