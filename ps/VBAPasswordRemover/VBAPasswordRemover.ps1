@@ -22,31 +22,76 @@ Copy-Item $FilePath $bakPath -Force
 Write-Host "Backup created: $bakPath"
 Write-Host "Processing: $FilePath"
 
-# Read entire file as bytes
-$data = [IO.File]::ReadAllBytes($FilePath)
-
-# Search for DPB= (ASCII bytes: 0x44 0x50 0x42 0x3D)
-$pattern = [System.Text.Encoding]::ASCII.GetBytes('DPB=')
-$pos = -1
-for ($i = 0; $i -le $data.Length - $pattern.Length; $i++) {
-    $match = $true
-    for ($j = 0; $j -lt $pattern.Length; $j++) {
-        if ($data[$i + $j] -ne $pattern[$j]) { $match = $false; break }
+function Find-DPB([byte[]]$data) {
+    $pattern = [System.Text.Encoding]::ASCII.GetBytes('DPB=')
+    for ($i = 0; $i -le $data.Length - $pattern.Length; $i++) {
+        $match = $true
+        for ($j = 0; $j -lt $pattern.Length; $j++) {
+            if ($data[$i + $j] -ne $pattern[$j]) { $match = $false; break }
+        }
+        if ($match) { return $i }
     }
-    if ($match) { $pos = $i; break }
+    return -1
 }
 
-if ($pos -eq -1) {
-    Write-Host ""
-    Write-Host "No VBA password hash (DPB=) found in this file." -ForegroundColor Yellow
-    Write-Host "The file may not contain a VBA project."
-    exit 0
+function Patch-DPB([byte[]]$data, [long]$pos) {
+    $data[$pos + 2] = 0x78
 }
 
-# Patch: DPB= -> DPx= (change byte at pos+2 from 0x42 to 0x78)
-$data[$pos + 2] = 0x78
+if ($ext -eq '.xls') {
+    # OLE2: DPB= is in raw bytes
+    $data = [IO.File]::ReadAllBytes($FilePath)
+    $pos = Find-DPB $data
+    if ($pos -eq -1) {
+        Write-Host "`nNo VBA password hash (DPB=) found." -ForegroundColor Yellow
+        exit 0
+    }
+    Patch-DPB $data $pos
+    [IO.File]::WriteAllBytes($FilePath, $data)
+} else {
+    # OOXML: vbaProject.bin is compressed inside ZIP
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-[IO.File]::WriteAllBytes($FilePath, $data)
+    # Use ScriptBlock::Create to defer type resolution past Add-Type
+    $block = [ScriptBlock]::Create('
+        param($path, $findDPB, $patchDPB)
+        $zip = [System.IO.Compression.ZipFile]::Open($path, [System.IO.Compression.ZipArchiveMode]::Update)
+        try {
+            $entry = $zip.Entries | Where-Object { $_.Name -eq "vbaProject.bin" } | Select-Object -First 1
+            if (-not $entry) { return $false }
+
+            $stream = $entry.Open()
+            $ms = New-Object IO.MemoryStream
+            $stream.CopyTo($ms)
+            $stream.Close()
+            $data = $ms.ToArray()
+            $ms.Close()
+
+            $pos = & $findDPB $data
+            if ($pos -eq -1) { return $false }
+
+            & $patchDPB $data $pos
+
+            $stream = $entry.Open()
+            $stream.SetLength(0)
+            $stream.Write($data, 0, $data.Length)
+            $stream.Close()
+
+            return $true
+        }
+        finally {
+            $zip.Dispose()
+        }
+    ')
+
+    $result = & $block $FilePath ${function:Find-DPB} ${function:Patch-DPB}
+
+    if (-not $result) {
+        Write-Host "`nNo VBA password hash (DPB=) found." -ForegroundColor Yellow
+        exit 0
+    }
+}
 
 Write-Host ""
 Write-Host "VBA password protection disabled." -ForegroundColor Green
