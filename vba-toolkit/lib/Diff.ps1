@@ -31,7 +31,7 @@ function Get-AllModules([string]$path) {
 # ============================================================================
 
 # Greedy approximate diff (not full LCS). Searches up to 100 lines ahead for sync points.
-function Get-LcsDiff([string[]]$a, [string[]]$b) {
+function Get-GreedyDiff([string[]]$a, [string[]]$b) {
     $m = $a.Count; $n = $b.Count
     # For large files, use a simpler greedy approach
     $result = [System.Collections.ArrayList]::new()
@@ -130,7 +130,7 @@ foreach ($name in $allNames) {
         } else {
             $modified++
             Write-Host "  ~ $name.$ext (modified)" -ForegroundColor Yellow
-            $diff = Get-LcsDiff ($codeA -split "`n") ($codeB -split "`n")
+            $diff = Get-GreedyDiff ($codeA -split "`n") ($codeB -split "`n")
             [void]$moduleDiffs.Add(@{ Name = "$name.$ext"; Status = 'modified'; Diff = $diff })
         }
     }
