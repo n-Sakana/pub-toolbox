@@ -860,6 +860,22 @@ function Get-VbaAnalysis {
     $comVarNames = [System.Collections.ArrayList]::new()
     foreach ($b in $comBindings) { if ($comVarNames -notcontains $b.VarName) { [void]$comVarNames.Add($b.VarName) } }
 
+    # --- External references from PROJECT stream ---
+    $externalRefs = [System.Collections.ArrayList]::new()
+    if ($Project.Ole2) {
+        $projEntry = $Project.Ole2.Entries | Where-Object { $_.Name -eq 'PROJECT' -and $_.ObjType -eq 2 } | Select-Object -First 1
+        if ($projEntry) {
+            $cp = if ($Project.Codepage) { $Project.Codepage } else { 932 }
+            $projData = Read-Ole2Stream $Project.Ole2 $projEntry
+            $projText = [System.Text.Encoding]::GetEncoding($cp).GetString($projData)
+            foreach ($line in $projText -split "`r`n|`n") {
+                if ($line -match '^Reference=' -and $line -match '#([^#]+)$') {
+                    [void]$externalRefs.Add($Matches[1])
+                }
+            }
+        }
+    }
+
     return @{
         Patterns = $patterns
         Findings = $findings
@@ -869,6 +885,7 @@ function Get-VbaAnalysis {
         ApiDecls = $apiDecls
         ApiCallNames = $apiCallNames
         AllCode = $allCode
+        ExternalRefs = $externalRefs
     }
 }
 

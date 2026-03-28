@@ -113,20 +113,12 @@ if ($analysis.ApiDecls.Count -gt 0) {
     }
 }
 
-# External references
-$projEntry = $project.Ole2.Entries | Where-Object { $_.Name -eq 'PROJECT' -and $_.ObjType -eq 2 } | Select-Object -First 1
-if ($projEntry) {
-    $projData = Read-Ole2Stream $project.Ole2 $projEntry
-    $refs = [System.Collections.ArrayList]::new()
-    foreach ($line in ([System.Text.Encoding]::GetEncoding($project.Codepage).GetString($projData)) -split "`r`n|`n") {
-        if ($line -match '^Reference=' -and $line -match '#([^#]+)$') { [void]$refs.Add($Matches[1]) }
-    }
-    if ($refs.Count -gt 0) {
-        [void]$report.AppendLine("## External References ($($refs.Count))")
-        [void]$report.AppendLine("")
-        foreach ($r in $refs) { [void]$report.AppendLine("  $r") }
-        [void]$report.AppendLine("")
-    }
+# External references (from shared analysis engine)
+if ($analysis.ExternalRefs.Count -gt 0) {
+    [void]$report.AppendLine("## External References ($($analysis.ExternalRefs.Count))")
+    [void]$report.AppendLine("")
+    foreach ($r in $analysis.ExternalRefs) { [void]$report.AppendLine("  $r") }
+    [void]$report.AppendLine("")
 }
 
 $issueCount = $analysis.IssueCount

@@ -93,37 +93,11 @@ foreach ($filePath in $files) {
             $row.CodeLines += $mod.Lines.Count
         }
 
-        # API declarations and COM objects
-        $apiNames = [System.Collections.ArrayList]::new()
-        $comProgIds = [System.Collections.ArrayList]::new()
-        foreach ($modName in $project.Modules.Keys) {
-            $mod = $project.Modules[$modName]
-            $code = $mod.Lines -join "`n"
-            foreach ($m in [regex]::Matches($code, '(?m)^[^''\r\n]*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)')) {
-                $n = $m.Groups[3].Value
-                if ($apiNames -notcontains $n) { [void]$apiNames.Add($n) }
-            }
-            foreach ($m in [regex]::Matches($code, '(?m)^[^''\r\n]*\bCreateObject\s*\(\s*"([^"]+)"')) {
-                $progId = $m.Groups[1].Value
-                if ($comProgIds -notcontains $progId) { [void]$comProgIds.Add($progId) }
-            }
-        }
-        $row.ApiDeclareCount = $apiNames.Count
-        $row.ComObjectCount = $comProgIds.Count
-
-        # Reference libraries from PROJECT stream
-        $projEntry = $project.Ole2.Entries | Where-Object { $_.Name -eq 'PROJECT' -and $_.ObjType -eq 2 } | Select-Object -First 1
-        if ($projEntry) {
-            $projData = Read-Ole2Stream $project.Ole2 $projEntry
-            $projText = [System.Text.Encoding]::GetEncoding($project.Codepage).GetString($projData)
-            $refs = [System.Collections.ArrayList]::new()
-            foreach ($line in $projText -split "`r`n|`n") {
-                if ($line -match '^Reference=' -and $line -match '#([^#]+)$') {
-                    [void]$refs.Add($Matches[1])
-                }
-            }
-            $row.References = $refs -join '; '
-        }
+        # Analysis (shared engine)
+        $analysis = Get-VbaAnalysis -Project $project
+        $row.ApiDeclareCount = $analysis.ApiDecls.Count
+        $row.ComObjectCount = $analysis.ComBindings.Count
+        $row.References = $analysis.ExternalRefs -join '; '
     } catch {
         $row.Error = $_.Exception.Message
         Write-VbaError 'Inventory' $fileName $_.Exception.Message
