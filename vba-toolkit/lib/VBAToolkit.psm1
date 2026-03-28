@@ -622,7 +622,10 @@ tr.$highlightClass td.ln { color: #cccccc; }
         [void]$contentSb.Append("<div class=`"module`" id=`"mod$tabIdx`"><table class=`"code-table`">")
         for ($i = 0; $i -lt $md.Lines.Count; $i++) {
             $trClass = ''
-            if ($md.Highlights -and $md.Highlights.ContainsKey($i)) { $trClass = $highlightClass }
+            if ($md.Highlights -and $md.Highlights.ContainsKey($i)) {
+                $hlVal = $md.Highlights[$i]
+                if ($hlVal -is [string]) { $trClass = $hlVal } else { $trClass = $highlightClass }
+            }
             $ln = $i + 1
             $code = & $he $md.Lines[$i]
             [void]$contentSb.Append("<tr class=`"$trClass`"><td class=`"ln`">$ln</td><td class=`"code`">$code</td></tr>")
@@ -631,9 +634,23 @@ tr.$highlightClass td.ln { color: #cccccc; }
         $tabIdx++
     }
 
+    # Collect all unique highlight classes from module data for minimap selector
+    $hlClasses = [System.Collections.ArrayList]::new()
+    foreach ($modName in $moduleData.Keys) {
+        $md = $moduleData[$modName]
+        if ($md.Highlights) {
+            foreach ($v in $md.Highlights.Values) {
+                $cls = if ($v -is [string]) { $v } else { $highlightClass }
+                if ($hlClasses -notcontains $cls) { [void]$hlClasses.Add($cls) }
+            }
+        }
+    }
+    if ($hlClasses.Count -eq 0) { [void]$hlClasses.Add($highlightClass) }
+    $hlSelector = ($hlClasses | ForEach-Object { "tr.$_" }) -join ', '
+
     New-HtmlBase -Title $title -Subtitle $subtitle `
         -ExtraCss $extraCss -SidebarHtml $sidebarSb.ToString() -ContentHtml $contentSb.ToString() `
-        -HighlightSelector "tr.$highlightClass" -FirstTabIndex $firstHlIdx -OutputPath $outputPath
+        -HighlightSelector $hlSelector -FirstTabIndex $firstHlIdx -OutputPath $outputPath
 }
 
 # ============================================================================
@@ -809,6 +826,50 @@ function Get-VbaAnalysis {
         'Encoding / obfuscation' = @{ Pattern = '(?m)^[^''\r\n]*\b(Chr\s*\$?\s*\(\s*\d+\s*\))'; Extract = { param($m) $m.Groups[1].Value }; Aggregate = $true }
     }
 
+    # --- Compatibility risk patterns ---
+    $compatPatterns = [ordered]@{
+        '64-bit: Missing PtrSafe' = @{
+            Pattern = '(?m)^[^''\r\n]*\bDeclare\s+(?!PtrSafe\b)(Function|Sub)\s+(\w+)'
+            Extract = { param($m) "$($m.Groups[2].Value) -- missing PtrSafe" }
+        }
+        '64-bit: Long for handles' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bDeclare\s+PtrSafe\s+(?:Function|Sub)\s+\w+[^''\n]*\bAs\s+Long\b'
+            Extract = { param($m) "As Long in PtrSafe Declare -- review for LongPtr" }
+        }
+        '64-bit: VarPtr/ObjPtr/StrPtr' = @{
+            Pattern = '(?mi)^[^''\r\n]*\b(VarPtr|ObjPtr|StrPtr)\s*\('
+            Extract = { param($m) "$($m.Groups[1].Value) -- returns LongPtr on 64-bit" }
+        }
+        'Deprecated: DDE' = @{
+            Pattern = '(?mi)^[^''\r\n]*\b(DDEInitiate|DDEExecute|DDEPoke|DDERequest|DDETerminate|DDETerminateAll)\b'
+            Extract = { param($m) "$($m.Groups[1].Value)" }
+        }
+        'Deprecated: IE Automation' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bInternetExplorer\.Application\b'
+            Extract = { param($m) "InternetExplorer.Application -- IE removed" }
+        }
+        'Deprecated: Legacy Controls' = @{
+            Pattern = '(?mi)^[^''\r\n]*\b(MSCAL\.Calendar|MSComDlg\.CommonDialog|MSComctlLib\.\w+|COMDLG32\.OCX)\b'
+            Extract = { param($m) "$($m.Groups[1].Value) -- no 64-bit version" }
+        }
+        'Deprecated: DAO' = @{
+            Pattern = '(?mi)^[^''\r\n]*\b(DAO\.Database|DAO\.Recordset|DBEngine\b|DAO\.QueryDef)'
+            Extract = { param($m) "$($m.Groups[1].Value)" }
+        }
+        'Legacy: DefType' = @{
+            Pattern = '(?mi)^\s*(Def(Bool|Byte|Int|Lng|LngLng|LngPtr|Cur|Sng|Dbl|Dec|Date|Str|Obj|Var))\s+'
+            Extract = { param($m) "$($m.Groups[1].Value)" }
+        }
+        'Legacy: GoSub' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bGoSub\b'
+            Extract = { param($m) "GoSub -- refactor to Sub/Function" }
+        }
+        'Legacy: While/Wend' = @{
+            Pattern = '(?mi)^\s*Wend\b'
+            Extract = { param($m) "While...Wend -- use Do While...Loop" }
+        }
+    }
+
     # --- Pattern matching ---
     $findings = [ordered]@{}
     $issueCount = 0
@@ -824,6 +885,24 @@ function Get-VbaAnalysis {
         if ($catFindings.Count -gt 0) {
             $issueCount += $catFindings.Count
             $findings[$cat] = @{ Findings = $catFindings; Aggregate = [bool]$p.Aggregate }
+        }
+    }
+
+    # --- Compatibility pattern matching ---
+    $compatFindings = [ordered]@{}
+    $compatIssueCount = 0
+    foreach ($cat in $compatPatterns.Keys) {
+        $p = $compatPatterns[$cat]
+        $catFindings = [System.Collections.ArrayList]::new()
+        foreach ($fn in $allCode.Keys) {
+            $content = $allCode[$fn] -join "`n"
+            foreach ($m in [regex]::Matches($content, $p.Pattern)) {
+                [void]$catFindings.Add("${fn}: $(& $p.Extract $m)")
+            }
+        }
+        if ($catFindings.Count -gt 0) {
+            $compatIssueCount += $catFindings.Count
+            $compatFindings[$cat] = @{ Findings = $catFindings; Aggregate = [bool]$p.Aggregate }
         }
     }
 
@@ -880,6 +959,9 @@ function Get-VbaAnalysis {
         Patterns = $patterns
         Findings = $findings
         IssueCount = $issueCount
+        CompatPatterns = $compatPatterns
+        CompatFindings = $compatFindings
+        CompatIssueCount = $compatIssueCount
         ComBindings = $comBindings
         ComVarNames = $comVarNames
         ApiDecls = $apiDecls

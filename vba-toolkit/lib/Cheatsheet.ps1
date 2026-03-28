@@ -366,6 +366,166 @@ text = d.GetText
         Example = ''
         Note = ''
     }
+
+    # --- Compatibility / Legacy replacements ---
+    'Declare without PtrSafe' = @{
+        Lib = '(any)'
+        Alt = 'Add PtrSafe keyword + review parameter types for LongPtr'
+        Example = @'
+' Before:
+Declare Function GetWindow Lib "user32" (ByVal hWnd As Long) As Long
+
+' After:
+Declare PtrSafe Function GetWindow Lib "user32" (ByVal hWnd As LongPtr) As LongPtr
+'@
+        Note = '64-bit Office requires PtrSafe on all Declare statements. Handle/pointer params must be LongPtr.'
+    }
+    'DDEInitiate' = @{
+        Lib = '(DDE)'
+        Alt = 'COM Automation or Application.Run for inter-app communication'
+        Example = @'
+' Before:
+ch = DDEInitiate("Excel", "Sheet1")
+DDEExecute ch, "[OPEN(""file.xls"")]"
+DDETerminate ch
+
+' After (COM Automation):
+Dim xlApp As Object
+Set xlApp = GetObject(, "Excel.Application")
+xlApp.Workbooks.Open "file.xls"
+'@
+        Note = 'DDE is deprecated and disabled by default in modern Office. Use COM Automation instead.'
+    }
+    'InternetExplorer.Application' = @{
+        Lib = '(COM)'
+        Alt = 'MSXML2.XMLHTTP for HTTP requests, or Selenium/Edge WebDriver for browser automation'
+        Example = @'
+' Before:
+Dim ie As Object
+Set ie = CreateObject("InternetExplorer.Application")
+ie.Navigate "https://example.com"
+
+' After (HTTP request only):
+Dim http As Object
+Set http = CreateObject("MSXML2.XMLHTTP")
+http.Open "GET", "https://example.com", False
+http.Send
+Dim html As String: html = http.responseText
+'@
+        Note = 'Internet Explorer has been removed from Windows. Use MSXML2.XMLHTTP for data retrieval or migrate to Edge WebDriver for browser automation.'
+    }
+    'MSComDlg.CommonDialog' = @{
+        Lib = '(OCX)'
+        Alt = 'Application.GetOpenFilename / GetSaveAsFilename (Excel) or Application.FileDialog'
+        Example = @'
+' Before:
+Dim dlg As MSComDlg.CommonDialog
+dlg.Filter = "Excel Files|*.xls"
+dlg.ShowOpen
+
+' After (Excel):
+Dim f As Variant
+f = Application.GetOpenFilename("Excel Files (*.xls),*.xls")
+If f <> False Then Workbooks.Open f
+
+' After (any Office host):
+With Application.FileDialog(msoFileDialogOpen)
+    .Filters.Clear
+    .Filters.Add "Excel Files", "*.xls"
+    If .Show Then MsgBox .SelectedItems(1)
+End With
+'@
+        Note = 'MSComDlg.CommonDialog (COMDLG32.OCX) has no 64-bit version. Use Application.FileDialog which is available in all Office hosts.'
+    }
+    'MSCAL.Calendar' = @{
+        Lib = '(OCX)'
+        Alt = 'MonthView control (MS Date and Time Picker) or custom UserForm'
+        Example = @'
+' Before:
+' MSCAL.Calendar ActiveX control on form
+
+' After: Use Microsoft Date and Time Picker 6.0 (SP6)
+' Or build a custom calendar UserForm using labels/buttons
+' Or use a simple InputBox with date validation:
+Dim d As String
+d = InputBox("Enter date (yyyy-mm-dd):")
+If IsDate(d) Then MsgBox CDate(d)
+'@
+        Note = 'MSCAL.Calendar (mscal.ocx) has no 64-bit version and is removed from Office 2010+. Use the Date Picker control or a custom UserForm.'
+    }
+    'DAO.Database' = @{
+        Lib = '(DAO)'
+        Alt = 'ADO (ADODB.Connection / ADODB.Recordset) or CurrentDb in Access'
+        Example = @'
+' Before:
+Dim db As DAO.Database
+Dim rs As DAO.Recordset
+Set db = DBEngine.OpenDatabase("C:\data.mdb")
+Set rs = db.OpenRecordset("SELECT * FROM Table1")
+
+' After (ADO):
+Dim cn As Object, rs As Object
+Set cn = CreateObject("ADODB.Connection")
+cn.Open "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=C:\data.mdb"
+Set rs = cn.Execute("SELECT * FROM Table1")
+'@
+        Note = 'DAO is still supported in Access (via CurrentDb) but standalone DAO references should migrate to ADO for better compatibility.'
+    }
+    'DefLng' = @{
+        Lib = '(VBA)'
+        Alt = 'Explicit variable declarations with Dim ... As Long'
+        Example = @'
+' Before:
+DefLng A-Z  ' all variables default to Long
+
+' After:
+' Remove DefLng and add explicit type declarations:
+Dim count As Long
+Dim index As Long
+Dim result As Long
+'@
+        Note = 'DefType statements (DefBool, DefInt, DefLng, etc.) make code harder to read and maintain. Use Option Explicit and declare each variable with its type.'
+    }
+    'GoSub' = @{
+        Lib = '(VBA)'
+        Alt = 'Refactor into separate Sub or Function procedures'
+        Example = @'
+' Before:
+Sub Main()
+    GoSub DoWork
+    Exit Sub
+DoWork:
+    MsgBox "Working"
+    Return
+End Sub
+
+' After:
+Sub Main()
+    DoWork
+End Sub
+Private Sub DoWork()
+    MsgBox "Working"
+End Sub
+'@
+        Note = 'GoSub/Return is a legacy construct from BASIC. Refactor labeled sections into standalone Sub/Function for clarity, testability, and maintainability.'
+    }
+    'While/Wend' = @{
+        Lib = '(VBA)'
+        Alt = 'Do While ... Loop (supports Exit Do)'
+        Example = @'
+' Before:
+While condition
+    DoSomething
+Wend
+
+' After:
+Do While condition
+    DoSomething
+    If needExit Then Exit Do  ' Wend has no Exit equivalent
+Loop
+'@
+        Note = 'While...Wend cannot be exited early (no Exit While). Do While...Loop supports Exit Do and is the modern VBA idiom.'
+    }
 }
 
 # ============================================================================

@@ -69,6 +69,7 @@ foreach ($filePath in $files) {
         CodeLines = 0
         ApiDeclareCount = 0
         ComObjectCount = 0
+        CompatIssues = 0
         References = ''
         Error = ''
     }
@@ -97,6 +98,7 @@ foreach ($filePath in $files) {
         $analysis = Get-VbaAnalysis -Project $project
         $row.ApiDeclareCount = $analysis.ApiDecls.Count
         $row.ComObjectCount = $analysis.ComBindings.Count
+        $row.CompatIssues = $analysis.CompatIssueCount
         $row.References = $analysis.ExternalRefs -join '; '
     } catch {
         $row.Error = $_.Exception.Message
@@ -111,7 +113,7 @@ $csvPath = Join-Path $outDir 'inventory.csv'
 $csvSb = [System.Text.StringBuilder]::new()
 
 # Header
-[void]$csvSb.AppendLine('RelativePath,FileName,Bas,Cls,Frm,TotalModules,CodeLines,ApiDeclare,ComObjects,References,Error')
+[void]$csvSb.AppendLine('RelativePath,FileName,Bas,Cls,Frm,TotalModules,CodeLines,ApiDeclare,ComObjects,CompatIssues,References,Error')
 
 # Rows
 foreach ($row in $rows) {
@@ -125,6 +127,7 @@ foreach ($row in $rows) {
         $row.CodeLines
         $row.ApiDeclareCount
         $row.ComObjectCount
+        $row.CompatIssues
         '"' + ($row.References -replace '"','""') + '"'
         '"' + ($row.Error -replace '"','""') + '"'
     )
@@ -136,12 +139,13 @@ $utf8Bom = New-Object System.Text.UTF8Encoding $true
 
 # Summary
 $totalFiles = $rows.Count
-$totalModules = 0; $totalLines = 0; $apiFiles = 0; $comFiles = 0; $errorFiles = 0
+$totalModules = 0; $totalLines = 0; $apiFiles = 0; $comFiles = 0; $compatFiles = 0; $errorFiles = 0
 foreach ($r in $rows) {
     $totalModules += $r.TotalModules
     $totalLines += $r.CodeLines
     if ($r.ApiDeclareCount -gt 0) { $apiFiles++ }
     if ($r.ComObjectCount -gt 0) { $comFiles++ }
+    if ($r.CompatIssues -gt 0) { $compatFiles++ }
     if ($r.Error -ne '') { $errorFiles++ }
 }
 
@@ -153,6 +157,7 @@ Write-Host "  Modules:     $totalModules" -ForegroundColor Gray
 Write-Host "  Code lines:  $totalLines" -ForegroundColor Gray
 Write-Host "  With API:    $apiFiles file(s)" -ForegroundColor $(if ($apiFiles -gt 0) { 'Yellow' } else { 'Gray' })
 Write-Host "  With COM:    $comFiles file(s)" -ForegroundColor Gray
+Write-Host "  With Compat: $compatFiles file(s)" -ForegroundColor $(if ($compatFiles -gt 0) { 'Magenta' } else { 'Gray' })
 if ($errorFiles -gt 0) { Write-Host "  Errors:      $errorFiles file(s)" -ForegroundColor Red }
 
 Write-VbaResult 'Inventory' "$($files.Count) files" "CSV: $csvPath" $outDir $sw.Elapsed.TotalSeconds

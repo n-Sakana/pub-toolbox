@@ -2,10 +2,9 @@
 chcp 65001 >nul
 setlocal
 if "%~1"=="" (
-    echo Drop an Excel file to comment out Win32 API declarations.
-    echo Supported: .xls / .xlsm / .xlam
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0lib\Sanitize.ps1"
     pause
-    exit /b 1
+    exit /b
 )
 for %%F in (%*) do (
     echo.
