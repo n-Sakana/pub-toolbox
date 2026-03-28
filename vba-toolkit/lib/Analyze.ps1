@@ -298,7 +298,9 @@ foreach ($p in $Paths) {
 
     if (Test-Path $resolved -PathType Container) {
         if (-not $baseDir) { $baseDir = $resolved }
-        Get-ChildItem $resolved -Recurse -File -Include '*.xlsm','*.xlam','*.xls' | ForEach-Object {
+        Get-ChildItem $resolved -Recurse -File -Include '*.xlsm','*.xlam','*.xls' | Where-Object {
+            $_.FullName -notmatch '[\\/]output[\\/]'
+        } | ForEach-Object {
             [void]$files.Add($_.FullName)
         }
     } else {
