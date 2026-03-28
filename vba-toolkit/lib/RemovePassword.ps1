@@ -26,10 +26,10 @@ function Find-DPB([byte[]]$data) {
 function Patch-XlsFile([string]$path) {
     $data = [IO.File]::ReadAllBytes($path)
     $pos = Find-DPB $data
-    if ($pos -eq -1) { return $false }
+    if ($pos -eq -1) { return 'not_found' }
     $data[$pos + 2] = 0x78
     [IO.File]::WriteAllBytes($path, $data)
-    return $true
+    return 'patched'
 }
 
 if ($ext -eq '.xls') {
@@ -47,7 +47,7 @@ if ($ext -eq '.xls') {
 
         $result = Patch-XlsFile $tempXls
 
-        if ($result) {
+        if ($result -eq 'patched') {
             # Note: Excel will show "invalid key DPx" dialog - click Yes to continue
             $wb = $excel.Workbooks.Open($tempXls, 0, $false)
             if ($ext -eq '.xlam') { $wb.SaveAs($FilePath, 55) }
@@ -62,7 +62,7 @@ if ($ext -eq '.xls') {
     }
 }
 
-if ($result) {
+if ($result -eq 'patched') {
     Write-Host ""
     Write-Host "VBA password protection disabled." -ForegroundColor Green
     Write-Host ""
