@@ -7,5 +7,9 @@ if "%~1"=="" (
     pause
     exit /b 1
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0lib\Extract.ps1" %*
+echo Starting Extract...
+echo Input: %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0lib\Extract.ps1" %* 2>&1
+echo.
+echo Exit code: %errorlevel%
 pause
