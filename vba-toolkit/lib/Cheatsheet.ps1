@@ -408,8 +408,17 @@ if ($found.Count -eq 0) {
 Write-Host "Found $($found.Count) API(s)"
 
 # ============================================================================
-# Generate HTML cheatsheet
+# Generate HTML — unified sidebar + code viewer UI
 # ============================================================================
+
+# Build code data per module (strip Attribute lines)
+$allModCode = [ordered]@{}  # modLabel -> string[]
+foreach ($mod in $modules) {
+    $result = Get-VbaModuleCode $ole2 $mod.Name
+    if (-not $result) { continue }
+    $lines = ($result.Code -split "`r`n|`n") | Where-Object { $_ -notmatch '^\s*Attribute\s+VB_' }
+    $allModCode["$($mod.Name).$($mod.Ext)"] = @($lines)
+}
 
 $he = { param($s) [System.Net.WebUtility]::HtmlEncode($s) }
 
@@ -419,109 +428,160 @@ $html = [System.Text.StringBuilder]::new()
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Win32 API Cheatsheet: $([IO.Path]::GetFileName($FilePath))</title>
+<title>Cheatsheet: $([System.Net.WebUtility]::HtmlEncode([IO.Path]::GetFileName($FilePath)))</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: 'Segoe UI', Meiryo, sans-serif; font-size: 14px; background: #1e1e1e; color: #d4d4d4; padding: 20px 40px; }
-h1 { font-size: 18px; color: #cccccc; margin-bottom: 4px; }
-.subtitle { font-size: 12px; color: #888; margin-bottom: 24px; }
-.api-card { background: #252526; border: 1px solid #3c3c3c; border-radius: 6px; margin-bottom: 16px; overflow: hidden; }
-.api-header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
-.api-header:hover { background: #2a2d2e; }
-.api-name { font-family: Consolas, monospace; font-size: 16px; font-weight: bold; color: #4fc1ff; }
-.api-lib { font-size: 12px; color: #888; }
-.risk { padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; }
-.risk-LOW { background: #1b3a1b; color: #6a9955; }
-.risk-MEDIUM { background: #4b3a00; color: #e8ab53; }
-.risk-HIGH { background: #4b1818; color: #f44747; }
-.risk-UNKNOWN { background: #333; color: #888; }
-.api-body { padding: 0 16px 16px; display: none; }
-.api-body.open { display: block; }
-.section-label { font-size: 11px; color: #888; text-transform: uppercase; margin-top: 12px; margin-bottom: 4px; }
-.alt { color: #6a9955; font-weight: bold; }
-.location { font-family: Consolas, monospace; font-size: 12px; color: #888; padding: 2px 0; }
-.location .file { color: #4fc1ff; }
-pre { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 12px; margin-top: 4px; font-family: Consolas, monospace; font-size: 13px; overflow-x: auto; line-height: 1.5; }
-pre .comment { color: #6a9955; }
-.note { font-size: 12px; color: #b0b0b0; margin-top: 8px; font-style: italic; }
-.summary { background: #252526; border: 1px solid #3c3c3c; border-radius: 6px; padding: 16px; margin-bottom: 24px; }
-.summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
-.summary-item { text-align: center; padding: 8px; border-radius: 4px; }
+body { font-family: Consolas, 'Courier New', monospace; font-size: 13px; background: #1e1e1e; color: #d4d4d4; }
+.header { background: #252526; padding: 10px 20px; border-bottom: 1px solid #3c3c3c; }
+.header h1 { font-size: 15px; font-weight: normal; color: #cccccc; }
+.header .sub { margin-top: 4px; font-size: 12px; color: #888; }
+.main { display: flex; height: calc(100vh - 52px); }
+.sidebar { width: 220px; min-width: 220px; background: #252526; border-right: 1px solid #3c3c3c; overflow-y: auto; padding: 8px 0; }
+.sidebar .item { padding: 6px 16px; cursor: pointer; color: #4fc1ff; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar .item:hover { background: #2a2d2e; }
+.sidebar .item.active { color: #ffffff; background: #37373d; border-left: 2px solid #0078d4; }
+.sidebar .item .lib { color: #606060; font-size: 11px; }
+.content { flex: 1; overflow: auto; position: relative; }
+.api-panel { display: none; }
+.api-panel.active { display: block; }
+.info-bar { background: #252526; padding: 10px 16px; border-bottom: 1px solid #3c3c3c; position: sticky; top: 0; z-index: 5; }
+.info-bar .alt-label { font-size: 11px; color: #888; text-transform: uppercase; }
+.info-bar .alt-value { color: #6a9955; font-weight: bold; margin-top: 2px; }
+.info-bar .note { color: #888; font-size: 12px; font-style: italic; margin-top: 4px; }
+.info-bar .example-toggle { color: #4fc1ff; cursor: pointer; font-size: 12px; margin-top: 6px; }
+.info-bar .example-toggle:hover { text-decoration: underline; }
+.info-bar pre { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px; margin-top: 6px; font-size: 12px; line-height: 1.5; display: none; }
+.info-bar pre.open { display: block; }
+.info-bar pre .cmt { color: #6a9955; }
+.mod-label { background: #2d2d2d; padding: 4px 16px; font-size: 11px; color: #888; border-bottom: 1px solid #3c3c3c; position: sticky; z-index: 4; }
+.code-table { width: 100%; border-collapse: collapse; }
+.code-table td { padding: 0 8px; line-height: 20px; vertical-align: top; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.code-table .ln { width: 50px; min-width: 50px; text-align: right; color: #606060; padding-right: 12px; user-select: none; border-right: 1px solid #3c3c3c; }
+tr.hl-api td.code { background: #1b2e4a; color: #a0c4f0; }
+tr.hl-api td.ln { color: #cccccc; }
+.minimap { position: fixed; right: 0; top: 52px; width: 14px; bottom: 0; background: #1e1e1e; border-left: 1px solid #3c3c3c; z-index: 20; cursor: pointer; }
+.minimap .mark { position: absolute; right: 2px; width: 10px; height: 3px; border-radius: 1px; background: #4fc1ff; }
+.minimap .viewport { position: absolute; right: 0; width: 14px; background: rgba(255,255,255,0.25); border-radius: 2px; pointer-events: none; }
 </style>
 </head>
 <body>
-<h1>Win32 API Migration Cheatsheet</h1>
-<div class="subtitle">$([IO.Path]::GetFileName($FilePath)) &mdash; $(Get-Date -Format 'yyyy-MM-dd')</div>
+<div class="header">
+  <h1>Win32 API Cheatsheet</h1>
+  <div class="sub">$([System.Net.WebUtility]::HtmlEncode([IO.Path]::GetFileName($FilePath))) &mdash; $($found.Count) API(s) detected</div>
+</div>
+<div class="main">
+<div class="sidebar">
 "@)
 
-# Summary
-$lowCount = 0; $medCount = 0; $highCount = 0; $unknownCount = 0
+# Sidebar: one item per API
+$apiIdx = 0
 foreach ($apiName in $found.Keys) {
     $info = $replacements[$apiName]
-    if ($info) {
-        switch ($info.Risk) { 'LOW' { $lowCount++ } 'MEDIUM' { $medCount++ } 'HIGH' { $highCount++ } }
-    } else { $unknownCount++ }
+    $lib = if ($info) { $info.Lib } else { '' }
+    [void]$html.Append("<div class=`"item`" onclick=`"showApi($apiIdx)`" id=`"api$apiIdx`">$(& $he $apiName) <span class=`"lib`">$lib</span></div>")
+    $apiIdx++
 }
 
-[void]$html.Append(@"
-<div class="summary">
-  <strong>$($found.Count) API(s) detected</strong>
-  <div class="summary-grid">
-    <div class="summary-item risk-LOW">LOW: $lowCount</div>
-    <div class="summary-item risk-MEDIUM">MEDIUM: $medCount</div>
-    <div class="summary-item risk-HIGH">HIGH: $highCount</div>
-  </div>
-  $(if ($unknownCount -gt 0) { "<div style='margin-top:8px;color:#888;'>Unknown (not in database): $unknownCount</div>" })
-</div>
-"@)
+[void]$html.Append("</div><div class=`"content`">")
 
-# API cards
+# Panels: one per API, showing all modules with highlighted usage lines
+$apiIdx = 0
 foreach ($apiName in $found.Keys) {
     $f = $found[$apiName]
     $info = $replacements[$apiName]
-    $risk = if ($info) { $info.Risk } else { 'UNKNOWN' }
-    $lib = if ($info) { $info.Lib } else { $f.Decl.Sig -replace '.*Lib\s+(\S+).*','$1' }
-    $alt = if ($info) { $info.Alt } else { 'No known alternative in database' }
+    $alt = if ($info) { $info.Alt } else { 'Not in database' }
+    $note = if ($info) { $info.Note } else { '' }
+    $example = if ($info) { $info.Example } else { '' }
 
-    [void]$html.Append("<div class=`"api-card`">")
-    [void]$html.Append("<div class=`"api-header`" onclick=`"this.nextElementSibling.classList.toggle('open')`">")
-    [void]$html.Append("<div><span class=`"api-name`">$(& $he $apiName)</span> <span class=`"api-lib`">$(& $he $lib)</span></div>")
-    [void]$html.Append("<span class=`"risk risk-$risk`">$risk</span>")
-    [void]$html.Append("</div>")
-    [void]$html.Append("<div class=`"api-body`">")
+    [void]$html.Append("<div class=`"api-panel`" id=`"panel$apiIdx`">")
 
-    # Alternative
-    [void]$html.Append("<div class=`"section-label`">Alternative</div>")
-    [void]$html.Append("<div class=`"alt`">$(& $he $alt)</div>")
-
-    # Usage locations
-    [void]$html.Append("<div class=`"section-label`">Usage in this file</div>")
-    if ($f.Decl) {
-        [void]$html.Append("<div class=`"location`"><span class=`"file`">$($f.Decl.File)</span> L$($f.Decl.Line) (declaration)</div>")
+    # Info bar
+    [void]$html.Append("<div class=`"info-bar`">")
+    [void]$html.Append("<div class=`"alt-label`">Alternative</div>")
+    [void]$html.Append("<div class=`"alt-value`">$(& $he $alt)</div>")
+    if ($note -and $note -ne '') {
+        [void]$html.Append("<div class=`"note`">$(& $he $note)</div>")
     }
-    foreach ($call in $f.Calls) {
-        [void]$html.Append("<div class=`"location`"><span class=`"file`">$($call.File)</span> L$($call.Line): $(& $he $call.Code)</div>")
-    }
-
-    # Example
-    if ($info -and $info.Example -and $info.Example -ne '') {
-        [void]$html.Append("<div class=`"section-label`">Migration Example</div>")
-        $exHtml = (& $he $info.Example) -replace "('.*)", '<span class="comment">$1</span>'
+    if ($example -and $example -ne '') {
+        [void]$html.Append("<div class=`"example-toggle`" onclick=`"this.nextElementSibling.classList.toggle('open')`">Show migration example</div>")
+        $exHtml = (& $he $example) -replace "('.*)", '<span class="cmt">$1</span>'
         [void]$html.Append("<pre>$exHtml</pre>")
     }
+    [void]$html.Append("</div>")
 
-    # Note
-    if ($info -and $info.Note -and $info.Note -ne '') {
-        [void]$html.Append("<div class=`"note`">$(& $he $info.Note)</div>")
+    # Code for each module that uses this API
+    $escapedApi = [regex]::Escape($apiName)
+    foreach ($modLabel in $allModCode.Keys) {
+        $lines = $allModCode[$modLabel]
+        # Check if this module has any usage of this API
+        $hasUsage = $false
+        foreach ($line in $lines) {
+            if ($line -match "\b$escapedApi\b" -and $line -notmatch '^\s*''') { $hasUsage = $true; break }
+        }
+        if (-not $hasUsage) { continue }
+
+        [void]$html.Append("<div class=`"mod-label`">$(& $he $modLabel)</div>")
+        [void]$html.Append("<table class=`"code-table`">")
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $trClass = ''
+            if ($lines[$i] -notmatch '^\s*''' -and $lines[$i] -match "\b$escapedApi\b") { $trClass = 'hl-api' }
+            $ln = $i + 1
+            [void]$html.Append("<tr class=`"$trClass`"><td class=`"ln`">$ln</td><td class=`"code`">$(& $he $lines[$i])</td></tr>")
+        }
+        [void]$html.Append("</table>")
     }
 
-    [void]$html.Append("</div></div>")
+    [void]$html.Append("</div>")
+    $apiIdx++
 }
 
 [void]$html.Append(@"
+<div class="minimap" id="minimap"><div class="viewport" id="viewport"></div></div>
+</div></div>
 <script>
-// Open first card by default
-document.querySelector('.api-body').classList.add('open');
+const content = document.querySelector('.content');
+const minimap = document.getElementById('minimap');
+const viewport = document.getElementById('viewport');
+function showApi(idx) {
+  document.querySelectorAll('.api-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sidebar .item').forEach(t => t.classList.remove('active'));
+  document.getElementById('panel' + idx).classList.add('active');
+  document.getElementById('api' + idx).classList.add('active');
+  content.scrollTop = 0;
+  updateMinimap();
+}
+function updateMinimap() {
+  minimap.querySelectorAll('.mark').forEach(m => m.remove());
+  const panel = document.querySelector('.api-panel.active');
+  if (!panel) return;
+  const rows = panel.querySelectorAll('tr.hl-api');
+  const allRows = panel.querySelectorAll('tr');
+  if (allRows.length === 0) return;
+  const mapH = minimap.clientHeight;
+  rows.forEach(r => {
+    const idx = Array.from(allRows).indexOf(r);
+    const mark = document.createElement('div');
+    mark.className = 'mark';
+    mark.style.top = (idx / allRows.length * mapH) + 'px';
+    mark.addEventListener('click', () => r.scrollIntoView({block:'center'}));
+    minimap.appendChild(mark);
+  });
+  updateViewport();
+}
+function updateViewport() {
+  const sh = content.scrollHeight, ch = content.clientHeight, st = content.scrollTop;
+  const mapH = minimap.clientHeight;
+  if (sh <= ch) { viewport.style.display = 'none'; return; }
+  viewport.style.display = '';
+  viewport.style.top = (st / sh * mapH) + 'px';
+  viewport.style.height = (ch / sh * mapH) + 'px';
+}
+content.addEventListener('scroll', updateViewport);
+minimap.addEventListener('click', (e) => {
+  if (e.target.classList.contains('mark')) return;
+  content.scrollTop = e.offsetY / minimap.clientHeight * content.scrollHeight - content.clientHeight / 2;
+});
+showApi(0);
 </script>
 </body></html>
 "@)
@@ -530,7 +590,7 @@ $baseName = [IO.Path]::GetFileNameWithoutExtension($FilePath)
 $htmlPath = Join-Path ([IO.Path]::GetDirectoryName($FilePath)) "${baseName}_cheatsheet.html"
 [IO.File]::WriteAllText($htmlPath, $html.ToString(), [System.Text.Encoding]::UTF8)
 
-# Also output text version
+# Text log
 $text = [System.Text.StringBuilder]::new()
 [void]$text.AppendLine("# Win32 API Migration Cheatsheet")
 [void]$text.AppendLine("# Source: $([IO.Path]::GetFileName($FilePath))")
@@ -539,10 +599,10 @@ $text = [System.Text.StringBuilder]::new()
 foreach ($apiName in $found.Keys) {
     $f = $found[$apiName]
     $info = $replacements[$apiName]
-    $risk = if ($info) { $info.Risk } else { 'UNKNOWN' }
     $alt = if ($info) { $info.Alt } else { 'Not in database' }
-    [void]$text.AppendLine("## $apiName [$risk]")
+    [void]$text.AppendLine("## $apiName")
     [void]$text.AppendLine("  Alternative: $alt")
+    if ($info -and $info.Note -ne '') { [void]$text.AppendLine("  Note: $($info.Note)") }
     if ($f.Decl) { [void]$text.AppendLine("  Declared: $($f.Decl.File) L$($f.Decl.Line)") }
     foreach ($call in $f.Calls) { [void]$text.AppendLine("  Called:   $($call.File) L$($call.Line): $($call.Code)") }
     [void]$text.AppendLine("")
