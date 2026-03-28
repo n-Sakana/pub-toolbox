@@ -55,7 +55,6 @@ if ($ext -eq '.xls') {
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
     $excel.EnableEvents = $false
-    $excel.AutomationSecurity = 3  # msoAutomationSecurityForceDisable
 
     try {
         # Open and save as .xls (OLE2) - xlExcel8 = 56
