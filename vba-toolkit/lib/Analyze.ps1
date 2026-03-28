@@ -424,41 +424,41 @@ if (-not $baseDir) { $baseDir = [IO.Path]::GetDirectoryName($files[0]) }
 $cfg = Load-AnalyzeConfig $configPath
 
 # Build active rules from analysis patterns
-$dummyAnalysis = Get-VbaAnalysis -Project @{ Modules = [ordered]@{}; Ole2 = $null }
+$patternDefs = Get-VbaAnalysis -Project @{ Modules = [ordered]@{}; Ole2 = $null }
 $sanitizeRules = [System.Collections.ArrayList]::new()
 $detectRules = [System.Collections.ArrayList]::new()
 $anySanitize = $false
 
-foreach ($name in $dummyAnalysis.Patterns.Keys) {
+foreach ($name in $patternDefs.Patterns.Keys) {
     $edrCfg = $cfg.edr[$name]
     if ($edrCfg -and $edrCfg.sanitize) {
-        [void]$sanitizeRules.Add(@{ Name = $name; Pattern = $dummyAnalysis.Patterns[$name].Pattern; Prefix = "' [EDR] "; Category = 'edr' })
+        [void]$sanitizeRules.Add(@{ Name = $name; Pattern = $patternDefs.Patterns[$name].Pattern; Prefix = "' [EDR] "; Category = 'edr' })
         $anySanitize = $true
     }
     if ($edrCfg -and $edrCfg.detect) {
-        [void]$detectRules.Add(@{ Name = $name; Pattern = $dummyAnalysis.Patterns[$name].Pattern; Category = 'edr' })
+        [void]$detectRules.Add(@{ Name = $name; Pattern = $patternDefs.Patterns[$name].Pattern; Category = 'edr' })
     }
 }
-foreach ($name in $dummyAnalysis.CompatPatterns.Keys) {
+foreach ($name in $patternDefs.CompatPatterns.Keys) {
     $cCfg = $cfg.compat[$name]
     if ($cCfg -and $cCfg.sanitize) {
-        [void]$sanitizeRules.Add(@{ Name = $name; Pattern = $dummyAnalysis.CompatPatterns[$name].Pattern; Prefix = "' [COMPAT] "; Category = 'compat' })
+        [void]$sanitizeRules.Add(@{ Name = $name; Pattern = $patternDefs.CompatPatterns[$name].Pattern; Prefix = "' [COMPAT] "; Category = 'compat' })
         $anySanitize = $true
     }
     if ($cCfg -and $cCfg.detect) {
-        [void]$detectRules.Add(@{ Name = $name; Pattern = $dummyAnalysis.CompatPatterns[$name].Pattern; Category = 'compat' })
+        [void]$detectRules.Add(@{ Name = $name; Pattern = $patternDefs.CompatPatterns[$name].Pattern; Category = 'compat' })
     }
 }
-foreach ($name in $dummyAnalysis.EnvPatterns.Keys) {
+foreach ($name in $patternDefs.EnvPatterns.Keys) {
     $eCfg = $cfg.env[$name]
     if ($eCfg -and $eCfg.detect) {
-        [void]$detectRules.Add(@{ Name = $name; Pattern = $dummyAnalysis.EnvPatterns[$name].Pattern; Category = 'env' })
+        [void]$detectRules.Add(@{ Name = $name; Pattern = $patternDefs.EnvPatterns[$name].Pattern; Category = 'env' })
     }
 }
-foreach ($name in $dummyAnalysis.BizPatterns.Keys) {
+foreach ($name in $patternDefs.BizPatterns.Keys) {
     $bCfg = $cfg.biz[$name]
     if ($bCfg -and $bCfg.detect) {
-        [void]$detectRules.Add(@{ Name = $name; Pattern = $dummyAnalysis.BizPatterns[$name].Pattern; Category = 'biz' })
+        [void]$detectRules.Add(@{ Name = $name; Pattern = $patternDefs.BizPatterns[$name].Pattern; Category = 'biz' })
     }
 }
 
@@ -1020,7 +1020,7 @@ foreach ($filePath in $files) {
             [void]$tooltipEntries.Append("$comma'$(& $he $key)':{alt:'$altJs',note:'$noteJs',ex:'$exJs'}")
         }
         # Also add pattern-level replacements
-        foreach ($patName in @($dummyAnalysis.Patterns.Keys) + @($dummyAnalysis.CompatPatterns.Keys) + @($dummyAnalysis.EnvPatterns.Keys) + @($dummyAnalysis.EnvInfoPatterns.Keys) + @($dummyAnalysis.BizPatterns.Keys)) {
+        foreach ($patName in @($patternDefs.Patterns.Keys) + @($patternDefs.CompatPatterns.Keys) + @($patternDefs.EnvPatterns.Keys) + @($patternDefs.EnvInfoPatterns.Keys) + @($patternDefs.BizPatterns.Keys)) {
             $info = $replacements[$patName]
             if (-not $info) { continue }
             $altJs = ($info.Alt -replace '\\','\\\\' -replace "'","\'")
