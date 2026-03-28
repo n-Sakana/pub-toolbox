@@ -17,7 +17,8 @@
 | AppData | AppData パス | `(?mi)^[^'\r\n]*\\AppData\\` |
 | Program Files | Program Files パス | `(?mi)^[^'\r\n]*\\Program Files` |
 | 固定プリンタ名 | ActivePrinter への文字列設定 | `(?mi)^[^'\r\n]*\.ActivePrinter\s*=\s*"` |
-| 固定端末名/IP | ハードコードされたIP | `(?mi)^[^'\r\n]*"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"` |
+| 固定 IP アドレス | ハードコードされた IP | `(?mi)^[^'\r\n]*"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"` |
+| 固定接続先 (接続文字列内) | Server= や Host= のホスト名 | `(?mi)^[^'\r\n]*(Server\s*=|Host\s*=)` |
 | localhost | localhost 参照 | `(?mi)^[^'\r\n]*\blocalhost\b` |
 | 接続文字列 | Provider= や DSN= | `(?mi)^[^'\r\n]*(Provider\s*=|DSN\s*=|Data\s+Source\s*=)` |
 | 外部ブック参照 (リテラル) | Workbooks.Open に文字列リテラル引数 | `(?mi)^[^'\r\n]*\bWorkbooks\.Open\s*\(\s*"` |
@@ -53,9 +54,16 @@ Info 項目はハイライトせず、テキストレポートにのみ出力。
 
 ## 判定列（CSV 出力に追加）
 
-### RiskLevel（技術危険度）
+### RiskLevel と MigrationClass の違い
 
-技術的にどれだけ危険か。「壊れるかどうか」の指標。
+この2つは別の温度計。混同しない。
+
+- **RiskLevel** = 技術危険度。「新環境で壊れるかどうか」の指標。コードの性質から機械的に判定。
+- **MigrationClass** = 対応方針。「移行にあたって何をすべきか」の指標。作業の種類と規模を示す。
+
+例: 固定パスが多数あるファイルは RiskLevel=Low（技術的には壊れない）だが MigrationClass=要保存先見直し（運用変更が必要）。
+
+### RiskLevel（技術危険度）
 
 | 値 | 条件 |
 |---|---|
@@ -65,7 +73,7 @@ Info 項目はハイライトせず、テキストレポートにのみ出力。
 
 ### MigrationClass（対応方針）
 
-移行にあたって何をすべきか。RiskLevel とは異なる軸。**複数該当する場合はセミコロン区切りで全て記載。**
+RiskLevel とは独立した軸。**複数該当する場合はセミコロン区切りで全て記載。** 直交する分類（コード修正と保存先見直し等）は両方出す。
 
 | 値 | 条件 |
 |---|---|
@@ -100,9 +108,10 @@ Info 項目はハイライトせず、テキストレポートにのみ出力。
 | 値 | 条件 |
 |---|---|
 | Security | EDR リスクあり |
-| Infra | 環境依存（パス、プリンタ、接続文字列）あり |
+| Infra | 環境依存（パス、プリンタ、接続文字列）、またはクライアント PC 構成（Office バージョン、ビット数）に関わるもの |
 | DB | DAO / ADO / 接続文字列あり |
-| BusinessOwner | 業務依存（Outlook、Word、印刷）あり |
+| BusinessOwner | 業務フローに影響する連携（Outlook メール送信、外部システム連携等） |
+| ClientPC | 印刷、PDF 出力、ActiveX 等のクライアント環境依存 |
 | Developer | 互換性リスクのみ（PtrSafe, DefType 等の純粋なコード修正） |
 
 ## CSV カラム（更新後）
@@ -143,7 +152,7 @@ Info 項目はハイライトせず、テキストレポートにのみ出力。
 | UNC パス | 設定ファイルや CustomDocumentProperties で外部化 | サーバー移行でパスが変わる |
 | ユーザーフォルダ | Environ$("USERPROFILE") で動的に取得 | ユーザー名はハードコードしない |
 | Desktop / Documents | Environ$("USERPROFILE") & "\Desktop" で取得 | 日英環境でフォルダ名が異なる。WScript.Shell.SpecialFolders は EDR リスクあり |
-| ThisWorkbook.Path (Info) | 通常は問題ないが確認推奨 | SharePoint/OneDrive 環境では期待したローカルパスにならない可能性がある |
+| ThisWorkbook.Path (Info) | 通常は問題ないが確認推奨 | SharePoint/OneDrive 環境では開き方や同期状態によって返る値が異なる場合がある |
 | ActiveWorkbook.Path (Info) | 同上 | 同上 |
 | 外部ブック参照 (リテラル) | 相対パスや ThisWorkbook.Path ベースに変更 | 固定パスでの外部参照は移行で壊れる |
 | 固定プリンタ名 | ActivePrinter を動的取得するか設定ファイル化 | 新環境にプリンタが存在しない可能性 |
