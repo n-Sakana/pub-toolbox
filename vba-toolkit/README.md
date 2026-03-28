@@ -7,6 +7,7 @@ Excel を開かずに VBA プロジェクトをバイナリレベルで操作す
 | BAT | 説明 |
 |-----|------|
 | `Extract.bat` | VBA コードをテキスト抽出 + EDR リスク分析 + 統合ソース出力 |
+| `Diff.bat` | 2つの Excel ファイルの VBA コードを差分比較 |
 | `Sanitize.bat` | Win32 API 宣言と呼び出しをコメントアウト |
 | `RemovePassword.bat` | VBA プロジェクトのパスワード保護を解除 |
 
@@ -29,6 +30,17 @@ Excel を開かずに VBA プロジェクトをバイナリレベルで操作す
 
 ルールは `lib/Sanitize.ps1` 冒頭の `$rules` で変更可能。
 
+### Diff
+
+```
+Diff.bat file1.xlsm file2.xlsm
+```
+
+- 両ファイルの VBA コードをバイナリレベルで抽出・比較
+- モジュールの追加/削除/変更を検出
+- 変更箇所を行単位で表示
+- `<fileA>_vs_<fileB>_diff.txt` にレポートを出力
+
 ### RemovePassword
 
 - Excel COM で `.xls` 変換→バイナリパッチ→元形式で保存
@@ -40,11 +52,13 @@ Excel を開かずに VBA プロジェクトをバイナリレベルで操作す
 ```
 vba-toolkit/
 ├── Extract.bat
+├── Diff.bat
 ├── Sanitize.bat
 ├── RemovePassword.bat
 └── lib/
     ├── VBAToolkit.psm1    共通モジュール (OLE2, VBA圧縮/展開)
     ├── Extract.ps1
+    ├── Diff.ps1
     ├── Sanitize.ps1
     └── RemovePassword.ps1
 ```
