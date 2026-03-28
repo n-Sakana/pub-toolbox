@@ -28,5 +28,27 @@
     "Legacy: DefType": { "detect": true, "sanitize": false },
     "Legacy: GoSub": { "detect": true, "sanitize": false },
     "Legacy: While/Wend": { "detect": true, "sanitize": false }
+  },
+  "env": {
+    "Fixed drive letter": { "detect": true, "sanitize": false },
+    "UNC path": { "detect": true, "sanitize": false },
+    "User folder": { "detect": true, "sanitize": false },
+    "Desktop / Documents": { "detect": true, "sanitize": false },
+    "AppData": { "detect": true, "sanitize": false },
+    "Program Files": { "detect": true, "sanitize": false },
+    "Fixed printer name": { "detect": true, "sanitize": false },
+    "Fixed IP address": { "detect": true, "sanitize": false },
+    "Fixed connection host": { "detect": true, "sanitize": false },
+    "localhost": { "detect": true, "sanitize": false },
+    "Connection string": { "detect": true, "sanitize": false },
+    "External workbook open (literal)": { "detect": true, "sanitize": false }
+  },
+  "biz": {
+    "Outlook integration": { "detect": true, "sanitize": false },
+    "Word integration": { "detect": true, "sanitize": false },
+    "Access / DB integration": { "detect": true, "sanitize": false },
+    "PDF export": { "detect": true, "sanitize": false },
+    "Print": { "detect": true, "sanitize": false },
+    "External EXE": { "detect": true, "sanitize": false }
   }
 }

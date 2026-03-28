@@ -870,6 +870,98 @@ function Get-VbaAnalysis {
         }
     }
 
+    # --- Environment dependency patterns ---
+    $envPatterns = [ordered]@{
+        'Fixed drive letter' = @{
+            Pattern = '(?mi)^[^''\r\n]*"[A-Z]:\\"'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'UNC path' = @{
+            Pattern = '(?mi)^[^''\r\n]*"\\\\[^"]+\\'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'User folder' = @{
+            Pattern = '(?mi)^[^''\r\n]*C:\\Users\\'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Desktop / Documents' = @{
+            Pattern = '(?mi)^[^''\r\n]*\\(Desktop|Documents)\\'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'AppData' = @{
+            Pattern = '(?mi)^[^''\r\n]*\\AppData\\'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Program Files' = @{
+            Pattern = '(?mi)^[^''\r\n]*\\Program Files'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Fixed printer name' = @{
+            Pattern = '(?mi)^[^''\r\n]*\.ActivePrinter\s*=\s*"'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Fixed IP address' = @{
+            Pattern = '(?mi)^[^''\r\n]*"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Fixed connection host' = @{
+            Pattern = '(?mi)^[^''\r\n]*(Server\s*=|Host\s*=)'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'localhost' = @{
+            Pattern = '(?mi)^[^''\r\n]*\blocalhost\b'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Connection string' = @{
+            Pattern = '(?mi)^[^''\r\n]*(Provider\s*=|DSN\s*=|Data\s+Source\s*=)'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'External workbook open (literal)' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bWorkbooks\.Open\s*\(\s*"'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+    }
+
+    # --- Environment Info patterns (no highlight, text report only) ---
+    $envInfoPatterns = [ordered]@{
+        'ThisWorkbook.Path' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bThisWorkbook\.Path\b'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'ActiveWorkbook.Path' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bActiveWorkbook\.Path\b'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+    }
+
+    # --- Business dependency patterns ---
+    $bizPatterns = [ordered]@{
+        'Outlook integration' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bOutlook\.Application\b'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Word integration' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bWord\.Application\b'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Access / DB integration' = @{
+            Pattern = '(?mi)^[^''\r\n]*\b(Access\.Application|CurrentDb|DoCmd)\b'
+            Extract = { param($m) $m.Groups[1].Value }
+        }
+        'PDF export' = @{
+            Pattern = '(?mi)^[^''\r\n]*\.ExportAsFixedFormat\b'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+        'Print' = @{
+            Pattern = '(?mi)^[^''\r\n]*\.(PrintOut|PrintPreview)\b'
+            Extract = { param($m) $m.Groups[1].Value }
+        }
+        'External EXE' = @{
+            Pattern = '(?mi)^[^''\r\n]*\bShell\s.*\.exe'
+            Extract = { param($m) $m.Value.Trim() }
+        }
+    }
+
     # --- Pattern matching ---
     $findings = [ordered]@{}
     $issueCount = 0
@@ -903,6 +995,60 @@ function Get-VbaAnalysis {
         if ($catFindings.Count -gt 0) {
             $compatIssueCount += $catFindings.Count
             $compatFindings[$cat] = @{ Findings = $catFindings; Aggregate = [bool]$p.Aggregate }
+        }
+    }
+
+    # --- Environment dependency pattern matching ---
+    $envFindings = [ordered]@{}
+    $envIssueCount = 0
+    foreach ($cat in $envPatterns.Keys) {
+        $p = $envPatterns[$cat]
+        $catFindings = [System.Collections.ArrayList]::new()
+        foreach ($fn in $allCode.Keys) {
+            $content = $allCode[$fn] -join "`n"
+            foreach ($m in [regex]::Matches($content, $p.Pattern)) {
+                [void]$catFindings.Add("${fn}: $(& $p.Extract $m)")
+            }
+        }
+        if ($catFindings.Count -gt 0) {
+            $envIssueCount += $catFindings.Count
+            $envFindings[$cat] = @{ Findings = $catFindings; Aggregate = [bool]$p.Aggregate }
+        }
+    }
+
+    # --- Environment Info pattern matching ---
+    $infoFindings = [ordered]@{}
+    $infoCount = 0
+    foreach ($cat in $envInfoPatterns.Keys) {
+        $p = $envInfoPatterns[$cat]
+        $catFindings = [System.Collections.ArrayList]::new()
+        foreach ($fn in $allCode.Keys) {
+            $content = $allCode[$fn] -join "`n"
+            foreach ($m in [regex]::Matches($content, $p.Pattern)) {
+                [void]$catFindings.Add("${fn}: $(& $p.Extract $m)")
+            }
+        }
+        if ($catFindings.Count -gt 0) {
+            $infoCount += $catFindings.Count
+            $infoFindings[$cat] = @{ Findings = $catFindings; Aggregate = $false }
+        }
+    }
+
+    # --- Business dependency pattern matching ---
+    $bizFindings = [ordered]@{}
+    $bizIssueCount = 0
+    foreach ($cat in $bizPatterns.Keys) {
+        $p = $bizPatterns[$cat]
+        $catFindings = [System.Collections.ArrayList]::new()
+        foreach ($fn in $allCode.Keys) {
+            $content = $allCode[$fn] -join "`n"
+            foreach ($m in [regex]::Matches($content, $p.Pattern)) {
+                [void]$catFindings.Add("${fn}: $(& $p.Extract $m)")
+            }
+        }
+        if ($catFindings.Count -gt 0) {
+            $bizIssueCount += $catFindings.Count
+            $bizFindings[$cat] = @{ Findings = $catFindings; Aggregate = [bool]$p.Aggregate }
         }
     }
 
@@ -962,6 +1108,15 @@ function Get-VbaAnalysis {
         CompatPatterns = $compatPatterns
         CompatFindings = $compatFindings
         CompatIssueCount = $compatIssueCount
+        EnvPatterns = $envPatterns
+        EnvFindings = $envFindings
+        EnvIssueCount = $envIssueCount
+        EnvInfoPatterns = $envInfoPatterns
+        InfoFindings = $infoFindings
+        InfoCount = $infoCount
+        BizPatterns = $bizPatterns
+        BizFindings = $bizFindings
+        BizIssueCount = $bizIssueCount
         ComBindings = $comBindings
         ComVarNames = $comVarNames
         ApiDecls = $apiDecls
@@ -1807,6 +1962,37 @@ Loop
         Example = ''
         Note = 'While...Wend cannot be exited early. Do While...Loop supports Exit Do.'
     }
+
+    # --- Environment dependency entries ---
+    'Fixed drive letter' = @{
+        Lib = '(Path)'
+        Alt = 'Use Environ$("TEMP") or ThisWorkbook.Path for dynamic resolution'
+        Example = ''
+        Note = 'Hardcoded paths break on OneDrive migration. Environ$ triggers EDR detection but is not blocked.'
+    }
+    'UNC path' = @{ Lib = '(Path)'; Alt = 'Externalize to config file or CustomDocumentProperties'; Example = ''; Note = 'Server paths change on migration.' }
+    'User folder' = @{ Lib = '(Path)'; Alt = 'Use Environ$("USERPROFILE") for dynamic resolution'; Example = ''; Note = 'Do not hardcode usernames in paths.' }
+    'Desktop / Documents' = @{ Lib = '(Path)'; Alt = 'Use Environ$("USERPROFILE") with subfolder name'; Example = ''; Note = 'Folder names differ between EN/JP locales. WScript.Shell.SpecialFolders has EDR risk.' }
+    'AppData' = @{ Lib = '(Path)'; Alt = 'Use Environ$("APPDATA") or Environ$("LOCALAPPDATA")'; Example = ''; Note = 'Hardcoded AppData paths break across users.' }
+    'Program Files' = @{ Lib = '(Path)'; Alt = 'Use Environ$("ProgramFiles") for dynamic resolution'; Example = ''; Note = 'Path differs between 32-bit and 64-bit.' }
+    'Fixed printer name' = @{ Lib = '(Printer)'; Alt = 'Read ActivePrinter dynamically or externalize to config'; Example = ''; Note = 'Target environment may have different printers.' }
+    'Fixed IP address' = @{ Lib = '(Network)'; Alt = 'Externalize to config file'; Example = ''; Note = 'IP addresses change on environment migration.' }
+    'Fixed connection host' = @{ Lib = '(Network)'; Alt = 'Externalize Server=/Host= values to config'; Example = ''; Note = 'Database/service hosts change on migration.' }
+    'localhost' = @{ Lib = '(Network)'; Alt = 'Verify localhost services exist in target environment'; Example = ''; Note = 'Local services may not be available in new environment.' }
+    'Connection string' = @{ Lib = '(DB)'; Alt = 'Externalize to config. Check Provider version (ACE vs Jet)'; Example = ''; Note = 'ACE/Jet Provider version differs on 64-bit.' }
+    'External workbook open (literal)' = @{ Lib = '(File)'; Alt = 'Use relative path or ThisWorkbook.Path base'; Example = ''; Note = 'Hardcoded external file references break on migration.' }
+
+    # --- Info items (no highlight, report only) ---
+    'ThisWorkbook.Path' = @{ Lib = '(Info)'; Alt = 'Usually fine, but verify in SharePoint/OneDrive'; Example = ''; Note = 'May return URL instead of local path depending on how file is opened and sync state.' }
+    'ActiveWorkbook.Path' = @{ Lib = '(Info)'; Alt = 'Same as ThisWorkbook.Path'; Example = ''; Note = 'Same OneDrive/SharePoint concern.' }
+
+    # --- Business dependency entries ---
+    'Outlook integration' = @{ Lib = '(Office)'; Alt = 'Usually works, but test CreateObject in target environment'; Example = ''; Note = 'Check Outlook version compatibility.' }
+    'Word integration' = @{ Lib = '(Office)'; Alt = 'Usually works, but test CreateObject in target environment'; Example = ''; Note = 'Check Word version compatibility.' }
+    'Access / DB integration' = @{ Lib = '(DB)'; Alt = 'Consider DAO to ADO migration. Check ACE Provider'; Example = ''; Note = '64-bit environment may have different Provider.' }
+    'PDF export' = @{ Lib = '(Print)'; Alt = 'ExportAsFixedFormat usually works'; Example = ''; Note = 'May depend on printer driver in some cases.' }
+    'Print' = @{ Lib = '(Print)'; Alt = 'Check for hardcoded printer names'; Example = ''; Note = 'Verify printer configuration in target environment.' }
+    'External EXE' = @{ Lib = '(Process)'; Alt = 'Likely blocked by EDR'; Example = ''; Note = 'Same risk level as Shell. Avoid launching external processes.' }
 }
 
 function Get-VbaApiReplacements {
