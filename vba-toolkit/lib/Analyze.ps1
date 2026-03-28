@@ -644,14 +644,21 @@ foreach ($filePath in $files) {
         $csvRow.NeedsReviewBy = $reviewers -join '; '
 
         # TopApiNames (GUI APIs first, then others, top 3)
-        $guiDecls = @($analysis.ApiDecls | Where-Object { $guiApiNames -contains $_.Name })
-        $otherDecls = @($analysis.ApiDecls | Where-Object { $guiApiNames -notcontains $_.Name })
-        $sortedApis = @($guiDecls) + @($otherDecls) | Select-Object -ExpandProperty Name -Unique | Select-Object -First 3
-        $csvRow.TopApiNames = $sortedApis -join '; '
+        $topApis = [System.Collections.ArrayList]::new()
+        foreach ($d in $analysis.ApiDecls) {
+            if ($guiApiNames -contains $d.Name -and $topApis -notcontains $d.Name) { [void]$topApis.Add($d.Name) }
+        }
+        foreach ($d in $analysis.ApiDecls) {
+            if ($guiApiNames -notcontains $d.Name -and $topApis -notcontains $d.Name) { [void]$topApis.Add($d.Name) }
+        }
+        $csvRow.TopApiNames = ($topApis | Select-Object -First 3) -join '; '
 
         # TopComProgIds (first 3 unique COM ProgIDs)
-        $comProgs = @($analysis.ComBindings | ForEach-Object { $_.ProgId } | Select-Object -Unique | Select-Object -First 3)
-        $csvRow.TopComProgIds = $comProgs -join '; '
+        $topCom = [System.Collections.ArrayList]::new()
+        foreach ($b in $analysis.ComBindings) {
+            if ($topCom -notcontains $b.ProgId) { [void]$topCom.Add($b.ProgId) }
+        }
+        $csvRow.TopComProgIds = ($topCom | Select-Object -First 3) -join '; '
 
         # SampleEvidence (heaviest finding, one representative line)
         $sampleEvidence = ''
