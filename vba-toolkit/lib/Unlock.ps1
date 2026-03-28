@@ -32,7 +32,7 @@ function Patch-XlsFile([string]$path) {
     $data = [IO.File]::ReadAllBytes($path)
     $pos = Find-DPB $data
     if ($pos -eq -1) { return 'not_found' }
-    $data[$pos + 2] = 0x78
+    $data[$pos + 2] = 0x78  # Change 'B' to 'x' in DPB= -> DPx= to invalidate password hash
     [IO.File]::WriteAllBytes($path, $data)
     return 'patched'
 }
@@ -64,6 +64,7 @@ if ($ext -eq '.xls') {
         $errorMsg = $_.Exception.Message
     }
     finally {
+        if ($wb) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wb) | Out-Null; $wb = $null }
         try { $excel.Quit() } catch {}
         [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null
         Remove-Item $tempXls -Force -ErrorAction SilentlyContinue

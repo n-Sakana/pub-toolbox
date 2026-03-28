@@ -30,6 +30,7 @@ function Get-AllModules([string]$path) {
 # LCS diff algorithm
 # ============================================================================
 
+# Greedy approximate diff (not full LCS). Searches up to 100 lines ahead for sync points.
 function Get-LcsDiff([string[]]$a, [string[]]$b) {
     $m = $a.Count; $n = $b.Count
     # For large files, use a simpler greedy approach
@@ -221,6 +222,33 @@ $textReport = [System.Text.StringBuilder]::new()
 [void]$textReport.AppendLine("# Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
 [void]$textReport.AppendLine("")
 [void]$textReport.AppendLine("Added: $added, Removed: $removed, Modified: $modified, Unchanged: $unchanged")
+[void]$textReport.AppendLine("")
+
+$addedMods = $moduleDiffs | Where-Object { $_.Status -eq 'added' }
+$removedMods = $moduleDiffs | Where-Object { $_.Status -eq 'removed' }
+$modifiedMods = $moduleDiffs | Where-Object { $_.Status -eq 'modified' }
+$unchangedMods = $moduleDiffs | Where-Object { $_.Status -eq 'unchanged' }
+
+if ($addedMods) {
+    [void]$textReport.AppendLine("Added modules:")
+    foreach ($m in $addedMods) { [void]$textReport.AppendLine("  + $($m.Name)") }
+    [void]$textReport.AppendLine("")
+}
+if ($removedMods) {
+    [void]$textReport.AppendLine("Removed modules:")
+    foreach ($m in $removedMods) { [void]$textReport.AppendLine("  - $($m.Name)") }
+    [void]$textReport.AppendLine("")
+}
+if ($modifiedMods) {
+    [void]$textReport.AppendLine("Modified modules:")
+    foreach ($m in $modifiedMods) { [void]$textReport.AppendLine("  ~ $($m.Name)") }
+    [void]$textReport.AppendLine("")
+}
+if ($unchangedMods) {
+    [void]$textReport.AppendLine("Unchanged: $($unchangedMods.Count) module(s)")
+    [void]$textReport.AppendLine("")
+}
+
 [IO.File]::WriteAllText((Join-Path $outDir 'diff.txt'), $textReport.ToString(), [System.Text.Encoding]::UTF8)
 
 Start-Process $htmlPath

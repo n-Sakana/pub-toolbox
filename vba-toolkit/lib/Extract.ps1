@@ -40,6 +40,7 @@ $totalExtracted = 0
 foreach ($FilePath in $files) {
     $fileName = [IO.Path]::GetFileName($FilePath)
     $baseName = [IO.Path]::GetFileNameWithoutExtension($FilePath)
+    $fileSw = [System.Diagnostics.Stopwatch]::StartNew()
 
     Write-VbaHeader 'Extract' $fileName
     Write-VbaLog 'Extract' $FilePath 'Started'
@@ -47,7 +48,8 @@ foreach ($FilePath in $files) {
     $project = Get-AllModuleCode $FilePath -StripAttributes
     if (-not $project) { Write-VbaError 'Extract' $fileName 'No vbaProject.bin found'; continue }
 
-    $modulesDir = Join-Path $outDir 'modules'
+    # Per-file subfolder to avoid module name collisions across files
+    $modulesDir = Join-Path $outDir "modules/$baseName"
     New-Item $modulesDir -ItemType Directory -Force | Out-Null
 
     # Write individual module files
@@ -107,10 +109,11 @@ foreach ($FilePath in $files) {
         [void]$combined.AppendLine($c.TrimStart("`r`n"))
         [void]$combined.AppendLine("")
     }
-    [IO.File]::WriteAllText((Join-Path $outDir 'combined.txt'), $combined.ToString(), [System.Text.Encoding]::UTF8)
+    [IO.File]::WriteAllText((Join-Path $outDir "${baseName}_combined.txt"), $combined.ToString(), [System.Text.Encoding]::UTF8)
 
+    $fileSw.Stop()
     $totalExtracted += $extracted
-    Write-VbaResult 'Extract' $fileName "$extracted module(s), $totalLines lines" $outDir $sw.Elapsed.TotalSeconds
+    Write-VbaResult 'Extract' $fileName "$extracted module(s), $totalLines lines" $outDir $fileSw.Elapsed.TotalSeconds
     Write-VbaLog 'Extract' $FilePath "$extracted modules, $totalLines lines | -> $outDir"
 }
 
