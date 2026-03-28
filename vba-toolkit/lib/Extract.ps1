@@ -29,8 +29,10 @@ foreach ($modName in $project.Modules.Keys) {
 Write-VbaStatus 'Extract' $fileName "$extracted module(s) extracted"
 
 # ============================================================================
-# Code Analysis
+# Code Analysis (via shared engine)
 # ============================================================================
+
+$analysis = Get-VbaAnalysis -Project $project
 
 $allFiles = Get-ChildItem $modulesDir -File
 $totalLines = 0
@@ -50,83 +52,31 @@ foreach ($f in $allFiles) {
 [void]$report.AppendLine("  Total: $totalLines lines")
 [void]$report.AppendLine("")
 
-# Analysis patterns
-$patterns = [ordered]@{
-    'Win32 API (Declare)' = @{
-        Pattern = '(?m)^[^''\r\n]*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)'
-        Extract = { param($m) "$($m.Groups[3].Value) ($(if($m.Groups[1].Value){'PtrSafe'} else {'Legacy'}))" }
+# Pattern findings
+foreach ($cat in $analysis.Findings.Keys) {
+    $f = $analysis.Findings[$cat]
+    [void]$report.AppendLine("## $cat ($($f.Findings.Count))")
+    [void]$report.AppendLine("")
+    if ($f.Aggregate) {
+        foreach ($g in ($f.Findings | Group-Object { $_ -replace ':.*', '' })) {
+            [void]$report.AppendLine("  $($g.Name): $($g.Count) occurrence(s)")
+        }
+    } else {
+        foreach ($item in ($f.Findings | Sort-Object -Unique)) { [void]$report.AppendLine("  $item") }
     }
-    'COM / CreateObject' = @{ Pattern = '(?m)^[^''\r\n]*\bCreateObject\s*\(\s*"([^"]+)"'; Extract = { param($m) $m.Groups[1].Value } }
-    'COM / GetObject' = @{ Pattern = '(?m)^[^''\r\n]*\bGetObject\s*\(\s*"?([^")\s]+)"?'; Extract = { param($m) $m.Groups[1].Value } }
-    'Shell / process' = @{ Pattern = '(?m)^[^''\r\n]*\b(Shell\s*[\("]|WScript\.Shell|cmd\s*/[ck])'; Extract = { param($m) $m.Groups[1].Value.Trim() } }
-    'File I/O' = @{
-        Pattern = '(?m)^[^''\r\n]*\b(Open\s+\S+\s+For\s+(Input|Output|Append|Binary|Random)|Kill\s|FileCopy\s|MkDir\s|RmDir\s)'
-        Extract = { param($m) if ($m.Groups[2].Value) { "Open For $($m.Groups[2].Value)" } else { $m.Groups[1].Value.Trim() } }
-    }
-    'FileSystemObject' = @{ Pattern = '(?m)^[^''\r\n]*\b(Scripting\.FileSystemObject)\b'; Extract = { param($m) $m.Groups[1].Value } }
-    'Registry' = @{ Pattern = '(?m)^[^''\r\n]*\b(GetSetting|SaveSetting|DeleteSetting|RegRead|RegWrite|RegDelete)\b'; Extract = { param($m) $m.Groups[1].Value } }
-    'SendKeys' = @{ Pattern = '(?m)^[^''\r\n]*\b(SendKeys)\b'; Extract = { param($m) $m.Groups[1].Value } }
-    'Network / HTTP' = @{ Pattern = '(?m)^[^''\r\n]*\b(MSXML2\.XMLHTTP|WinHttp\.WinHttpRequest|URLDownloadToFile|MSXML2\.ServerXMLHTTP)\b'; Extract = { param($m) $m.Groups[1].Value } }
-    'PowerShell / WScript' = @{ Pattern = '(?mi)^[^''\r\n]*\b(powershell|wscript|cscript|mshta)\b'; Extract = { param($m) $m.Groups[1].Value } }
-    'Process / WMI' = @{ Pattern = '(?m)^[^''\r\n]*\b(winmgmts|Win32_Process|WbemScripting|ExecQuery)\b'; Extract = { param($m) $m.Groups[1].Value } }
-    'DLL loading' = @{ Pattern = '(?m)^[^''\r\n]*\b(LoadLibrary|GetProcAddress|FreeLibrary|CallByName)\b'; Extract = { param($m) $m.Groups[1].Value } }
-    'Clipboard' = @{ Pattern = '(?m)^[^''\r\n]*\b(MSForms\.DataObject|GetClipboardData|SetClipboardData)\b'; Extract = { param($m) $m.Groups[1].Value } }
-    'Environment' = @{ Pattern = '(?m)^[^''\r\n]*\b(Environ\s*\$?\s*\()'; Extract = { param($m) "Environ" } }
-    'Auto-execution' = @{ Pattern = '(?m)^\s*(Sub\s+(Auto_Open|Auto_Close|Workbook_Open|Workbook_BeforeClose|Document_Open|Document_Close)\b)'; Extract = { param($m) $m.Groups[2].Value } }
-    'Encoding / obfuscation' = @{ Pattern = '(?m)^[^''\r\n]*\b(Chr\s*\$?\s*\(\s*\d+\s*\))'; Extract = { param($m) $m.Groups[1].Value }; Aggregate = $true }
+    [void]$report.AppendLine("")
 }
 
-$issueCount = 0
-foreach ($cat in $patterns.Keys) {
-    $p = $patterns[$cat]
-    $findings = [System.Collections.ArrayList]::new()
-    foreach ($f in $allFiles) {
-        $content = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
-        foreach ($m in [regex]::Matches($content, $p.Pattern)) {
-            [void]$findings.Add("$($f.Name): $(& $p.Extract $m)")
-        }
-    }
-    if ($findings.Count -gt 0) {
-        $issueCount += $findings.Count
-        [void]$report.AppendLine("## $cat ($($findings.Count))")
-        [void]$report.AppendLine("")
-        if ($p.Aggregate) {
-            foreach ($g in ($findings | Group-Object { $_ -replace ':.*', '' })) {
-                [void]$report.AppendLine("  $($g.Name): $($g.Count) occurrence(s)")
-            }
-        } else {
-            foreach ($item in ($findings | Sort-Object -Unique)) { [void]$report.AppendLine("  $item") }
-        }
-        [void]$report.AppendLine("")
-    }
-}
-
-# COM usage trace
-$allCode = @{}
-foreach ($f in $allFiles) { $allCode[$f.Name] = ([IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)) -split "`r`n|`n" }
-
-$comBindings = [System.Collections.ArrayList]::new()
-foreach ($fn in $allCode.Keys) {
-    $lines = $allCode[$fn]
-    for ($li = 0; $li -lt $lines.Count; $li++) {
-        if ($lines[$li] -match '^\s*''') { continue }
-        if ($lines[$li] -match '\bSet\s+(\w+)\s*=\s*CreateObject\s*\(\s*"([^"]+)"') {
-            [void]$comBindings.Add(@{ VarName = $Matches[1]; ProgId = $Matches[2]; File = $fn; Line = $li + 1 })
-        } elseif ($lines[$li] -match '\bSet\s+(\w+)\s*=\s*GetObject\s*\(') {
-            [void]$comBindings.Add(@{ VarName = $Matches[1]; ProgId = '(GetObject)'; File = $fn; Line = $li + 1 })
-        }
-    }
-}
-
-if ($comBindings.Count -gt 0) {
+# COM usage details
+if ($analysis.ComBindings.Count -gt 0) {
     [void]$report.AppendLine("## COM Object Usage Details")
     [void]$report.AppendLine("")
-    foreach ($g in ($comBindings | Group-Object { $_.ProgId } | Sort-Object Name)) {
+    foreach ($g in ($analysis.ComBindings | Group-Object { $_.ProgId } | Sort-Object Name)) {
         [void]$report.AppendLine("  $($g.Name)")
         foreach ($b in $g.Group) { [void]$report.AppendLine("    $($b.File) L$($b.Line): Set $($b.VarName) = ...") }
         $varNames = ($g.Group | ForEach-Object { $_.VarName }) | Sort-Object -Unique
-        foreach ($fn in $allCode.Keys) {
-            $lines = $allCode[$fn]
+        foreach ($fn in $analysis.AllCode.Keys) {
+            $lines = $analysis.AllCode[$fn]
             for ($li = 0; $li -lt $lines.Count; $li++) {
                 if ($lines[$li] -match '^\s*''') { continue }
                 foreach ($vn in $varNames) {
@@ -142,26 +92,15 @@ if ($comBindings.Count -gt 0) {
     }
 }
 
-# API usage trace
-$apiDecls = [System.Collections.ArrayList]::new()
-foreach ($fn in $allCode.Keys) {
-    $lines = $allCode[$fn]
-    for ($li = 0; $li -lt $lines.Count; $li++) {
-        if ($lines[$li] -match '^\s*''') { continue }
-        if ($lines[$li] -match '(?i)\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)\s+Lib\s+(.*)') {
-            $trimmed = $lines[$li].Trim(); if ($trimmed.Length -gt 100) { $trimmed = $trimmed.Substring(0, 97) + '...' }
-            [void]$apiDecls.Add(@{ Name = $Matches[3]; File = $fn; Line = $li + 1; Sig = $trimmed })
-        }
-    }
-}
-if ($apiDecls.Count -gt 0) {
+# API usage details
+if ($analysis.ApiDecls.Count -gt 0) {
     [void]$report.AppendLine("## Win32 API Usage Details")
     [void]$report.AppendLine("")
-    foreach ($api in $apiDecls) {
+    foreach ($api in $analysis.ApiDecls) {
         [void]$report.AppendLine("  $($api.Name)")
         [void]$report.AppendLine("    $($api.File) L$($api.Line): $($api.Sig)")
-        foreach ($fn in $allCode.Keys) {
-            $lines = $allCode[$fn]
+        foreach ($fn in $analysis.AllCode.Keys) {
+            $lines = $analysis.AllCode[$fn]
             for ($li = 0; $li -lt $lines.Count; $li++) {
                 if ($lines[$li] -match '^\s*''' -or $lines[$li] -match '(?i)\bDeclare\s') { continue }
                 if ($lines[$li] -match "\b$([regex]::Escape($api.Name))\b") {
@@ -190,6 +129,7 @@ if ($projEntry) {
     }
 }
 
+$issueCount = $analysis.IssueCount
 if ($issueCount -eq 0) {
     [void]$report.AppendLine("## Result"); [void]$report.AppendLine("")
     [void]$report.AppendLine("  No external dependencies detected. Migration risk: LOW")
@@ -199,8 +139,7 @@ if ($issueCount -eq 0) {
 }
 
 $reportText = $report.ToString()
-$reportPath = Join-Path $outDir 'analysis.txt'
-[IO.File]::WriteAllText($reportPath, $reportText, [System.Text.Encoding]::UTF8)
+[IO.File]::WriteAllText((Join-Path $outDir 'analysis.txt'), $reportText, [System.Text.Encoding]::UTF8)
 Write-Host ""; Write-Host $reportText
 
 # Combined source
@@ -225,16 +164,7 @@ foreach ($f in $sorted) {
 
 # HTML viewer
 $hlPatterns = [System.Collections.ArrayList]::new()
-foreach ($cat in $patterns.Keys) { if (-not $patterns[$cat].Aggregate) { [void]$hlPatterns.Add($patterns[$cat].Pattern) } }
-$apiCallNames = [System.Collections.ArrayList]::new()
-foreach ($f in $allFiles) {
-    $c = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
-    foreach ($m in [regex]::Matches($c, '(?m)^[^''\r\n]*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)')) {
-        $n = $m.Groups[3].Value; if ($apiCallNames -notcontains $n) { [void]$apiCallNames.Add($n) }
-    }
-}
-$comVarNames = [System.Collections.ArrayList]::new()
-foreach ($b in $comBindings) { if ($comVarNames -notcontains $b.VarName) { [void]$comVarNames.Add($b.VarName) } }
+foreach ($cat in $analysis.Patterns.Keys) { if (-not $analysis.Patterns[$cat].Aggregate) { [void]$hlPatterns.Add($analysis.Patterns[$cat].Pattern) } }
 
 $htmlModules = [ordered]@{}
 foreach ($f in $sorted) {
@@ -246,8 +176,8 @@ foreach ($f in $sorted) {
         if ($lines[$i] -match '^\s*''') { continue }
         $hit = $false
         foreach ($pat in $hlPatterns) { if ($lines[$i] -match $pat) { $hit = $true; break } }
-        if (-not $hit) { foreach ($n in $apiCallNames) { if ($lines[$i] -match "\b$([regex]::Escape($n))\b" -and $lines[$i] -notmatch '(?i)\bDeclare\s') { $hit = $true; break } } }
-        if (-not $hit) { foreach ($vn in $comVarNames) { if ($lines[$i] -match "\b$([regex]::Escape($vn))\.") { $hit = $true; break } } }
+        if (-not $hit) { foreach ($n in $analysis.ApiCallNames) { if ($lines[$i] -match "\b$([regex]::Escape($n))\b" -and $lines[$i] -notmatch '(?i)\bDeclare\s') { $hit = $true; break } } }
+        if (-not $hit) { foreach ($vn in $analysis.ComVarNames) { if ($lines[$i] -match "\b$([regex]::Escape($vn))\.") { $hit = $true; break } } }
         if ($hit) { $highlights[$i] = $true }
     }
     $htmlModules[$modName] = @{ Ext = $modExt; Lines = [System.Collections.ArrayList]::new($lines); Highlights = $highlights }

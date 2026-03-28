@@ -728,6 +728,110 @@ function Get-AllModuleCode {
     return @{ Modules = $result; Ole2 = $ole2; Ole2Bytes = $proj.Bytes; IsZip = $proj.IsZip; Codepage = $codepage; FilePath = $FilePath }
 }
 
+# ============================================================================
+# Analysis engine (shared by Extract, Cheatsheet)
+# ============================================================================
+
+function Get-VbaAnalysis {
+    param(
+        [hashtable]$Project  # result of Get-AllModuleCode
+    )
+
+    $allCode = @{}  # fileName -> lines array
+    foreach ($modName in $Project.Modules.Keys) {
+        $mod = $Project.Modules[$modName]
+        $allCode["$modName.$($mod.Ext)"] = $mod.Lines
+    }
+
+    # --- EDR detection patterns ---
+    $patterns = [ordered]@{
+        'Win32 API (Declare)' = @{
+            Pattern = '(?m)^[^''\r\n]*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)'
+            Extract = { param($m) "$($m.Groups[3].Value) ($(if($m.Groups[1].Value){'PtrSafe'} else {'Legacy'}))" }
+        }
+        'COM / CreateObject' = @{ Pattern = '(?m)^[^''\r\n]*\bCreateObject\s*\(\s*"([^"]+)"'; Extract = { param($m) $m.Groups[1].Value } }
+        'COM / GetObject' = @{ Pattern = '(?m)^[^''\r\n]*\bGetObject\s*\(\s*"?([^")\s]+)"?'; Extract = { param($m) $m.Groups[1].Value } }
+        'Shell / process' = @{ Pattern = '(?m)^[^''\r\n]*\b(Shell\s*[\("]|WScript\.Shell|cmd\s*/[ck])'; Extract = { param($m) $m.Groups[1].Value.Trim() } }
+        'File I/O' = @{
+            Pattern = '(?m)^[^''\r\n]*\b(Open\s+\S+\s+For\s+(Input|Output|Append|Binary|Random)|Kill\s|FileCopy\s|MkDir\s|RmDir\s)'
+            Extract = { param($m) if ($m.Groups[2].Value) { "Open For $($m.Groups[2].Value)" } else { $m.Groups[1].Value.Trim() } }
+        }
+        'FileSystemObject' = @{ Pattern = '(?m)^[^''\r\n]*\b(Scripting\.FileSystemObject)\b'; Extract = { param($m) $m.Groups[1].Value } }
+        'Registry' = @{ Pattern = '(?m)^[^''\r\n]*\b(GetSetting|SaveSetting|DeleteSetting|RegRead|RegWrite|RegDelete)\b'; Extract = { param($m) $m.Groups[1].Value } }
+        'SendKeys' = @{ Pattern = '(?m)^[^''\r\n]*\b(SendKeys)\b'; Extract = { param($m) $m.Groups[1].Value } }
+        'Network / HTTP' = @{ Pattern = '(?m)^[^''\r\n]*\b(MSXML2\.XMLHTTP|WinHttp\.WinHttpRequest|URLDownloadToFile|MSXML2\.ServerXMLHTTP)\b'; Extract = { param($m) $m.Groups[1].Value } }
+        'PowerShell / WScript' = @{ Pattern = '(?mi)^[^''\r\n]*\b(powershell|wscript|cscript|mshta)\b'; Extract = { param($m) $m.Groups[1].Value } }
+        'Process / WMI' = @{ Pattern = '(?m)^[^''\r\n]*\b(winmgmts|Win32_Process|WbemScripting|ExecQuery)\b'; Extract = { param($m) $m.Groups[1].Value } }
+        'DLL loading' = @{ Pattern = '(?m)^[^''\r\n]*\b(LoadLibrary|GetProcAddress|FreeLibrary|CallByName)\b'; Extract = { param($m) $m.Groups[1].Value } }
+        'Clipboard' = @{ Pattern = '(?m)^[^''\r\n]*\b(MSForms\.DataObject|GetClipboardData|SetClipboardData)\b'; Extract = { param($m) $m.Groups[1].Value } }
+        'Environment' = @{ Pattern = '(?m)^[^''\r\n]*\b(Environ\s*\$?\s*\()'; Extract = { param($m) "Environ" } }
+        'Auto-execution' = @{ Pattern = '(?m)^\s*(Sub\s+(Auto_Open|Auto_Close|Workbook_Open|Workbook_BeforeClose|Document_Open|Document_Close)\b)'; Extract = { param($m) $m.Groups[2].Value } }
+        'Encoding / obfuscation' = @{ Pattern = '(?m)^[^''\r\n]*\b(Chr\s*\$?\s*\(\s*\d+\s*\))'; Extract = { param($m) $m.Groups[1].Value }; Aggregate = $true }
+    }
+
+    # --- Pattern matching ---
+    $findings = [ordered]@{}
+    $issueCount = 0
+    foreach ($cat in $patterns.Keys) {
+        $p = $patterns[$cat]
+        $catFindings = [System.Collections.ArrayList]::new()
+        foreach ($fn in $allCode.Keys) {
+            $content = $allCode[$fn] -join "`n"
+            foreach ($m in [regex]::Matches($content, $p.Pattern)) {
+                [void]$catFindings.Add("${fn}: $(& $p.Extract $m)")
+            }
+        }
+        if ($catFindings.Count -gt 0) {
+            $issueCount += $catFindings.Count
+            $findings[$cat] = @{ Findings = $catFindings; Aggregate = [bool]$p.Aggregate }
+        }
+    }
+
+    # --- COM object tracking ---
+    $comBindings = [System.Collections.ArrayList]::new()
+    foreach ($fn in $allCode.Keys) {
+        $lines = $allCode[$fn]
+        for ($li = 0; $li -lt $lines.Count; $li++) {
+            if ($lines[$li] -match '^\s*''') { continue }
+            if ($lines[$li] -match '\bSet\s+(\w+)\s*=\s*CreateObject\s*\(\s*"([^"]+)"') {
+                [void]$comBindings.Add(@{ VarName = $Matches[1]; ProgId = $Matches[2]; File = $fn; Line = $li + 1 })
+            } elseif ($lines[$li] -match '\bSet\s+(\w+)\s*=\s*GetObject\s*\(') {
+                [void]$comBindings.Add(@{ VarName = $Matches[1]; ProgId = '(GetObject)'; File = $fn; Line = $li + 1 })
+            }
+        }
+    }
+
+    # --- API declarations + call sites ---
+    $apiDecls = [System.Collections.ArrayList]::new()
+    $apiCallNames = [System.Collections.ArrayList]::new()
+    foreach ($fn in $allCode.Keys) {
+        $lines = $allCode[$fn]
+        for ($li = 0; $li -lt $lines.Count; $li++) {
+            if ($lines[$li] -match '^\s*''') { continue }
+            if ($lines[$li] -match '(?i)\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)\s+Lib\s+(.*)') {
+                $trimmed = $lines[$li].Trim(); if ($trimmed.Length -gt 100) { $trimmed = $trimmed.Substring(0, 97) + '...' }
+                [void]$apiDecls.Add(@{ Name = $Matches[3]; File = $fn; Line = $li + 1; Sig = $trimmed })
+                if ($apiCallNames -notcontains $Matches[3]) { [void]$apiCallNames.Add($Matches[3]) }
+            }
+        }
+    }
+
+    # COM variable names for highlight
+    $comVarNames = [System.Collections.ArrayList]::new()
+    foreach ($b in $comBindings) { if ($comVarNames -notcontains $b.VarName) { [void]$comVarNames.Add($b.VarName) } }
+
+    return @{
+        Patterns = $patterns
+        Findings = $findings
+        IssueCount = $issueCount
+        ComBindings = $comBindings
+        ComVarNames = $comVarNames
+        ApiDecls = $apiDecls
+        ApiCallNames = $apiCallNames
+        AllCode = $allCode
+    }
+}
+
 Export-ModuleMember -Function Read-Ole2, Read-Ole2Stream, Write-Ole2Stream,
     Decompress-VBA, Compress-VBA,
     Get-VbaProjectBytes, Save-VbaProjectBytes,
@@ -735,4 +839,4 @@ Export-ModuleMember -Function Read-Ole2, Read-Ole2Stream, Write-Ole2Stream,
     New-HtmlCodeView,
     Resolve-VbaFilePath, New-VbaOutputDir,
     Write-VbaLog, Write-VbaStatus, Write-VbaResult, Write-VbaError, Write-VbaHeader,
-    Get-VbaCodepage, Get-AllModuleCode
+    Get-VbaCodepage, Get-AllModuleCode, Get-VbaAnalysis
