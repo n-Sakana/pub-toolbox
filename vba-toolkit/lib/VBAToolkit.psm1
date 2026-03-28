@@ -156,6 +156,11 @@ function Write-Ole2Stream([byte[]]$ole2Bytes, $ole2, $entry, [byte[]]$newData) {
             [Array]::Copy($ole2.MiniStreamData, $written2, $ole2Bytes, $off2, [Math]::Min($sectorSize, $ole2.MiniStreamData.Length - $written2))
             $written2 += $sectorSize; $s2 = $fat[$s2]
         }
+        # Validate mini stream write
+        $actualWritten = [Math]::Min($written, $newData.Length)
+        if ($actualWritten -lt $newData.Length) {
+            throw "Write-Ole2Stream: data truncated (mini stream). Wrote $actualWritten of $($newData.Length) bytes. Sector chain too short."
+        }
     } else {
         $s = $entry.Start; $written = 0; $visited = @{}
         while ($s -ge 0 -and $s -ne -2 -and -not $visited.ContainsKey($s) -and $written -lt $newData.Length) {
@@ -167,6 +172,11 @@ function Write-Ole2Stream([byte[]]$ole2Bytes, $ole2, $entry, [byte[]]$newData) {
                 for ($p = $toWrite; $p -lt $sectorSize; $p++) { $ole2Bytes[$off + $p] = 0 }
             }
             $written += $sectorSize; $s = $fat[$s]
+        }
+        # Validate write
+        $actualWritten = [Math]::Min($written, $newData.Length)
+        if ($actualWritten -lt $newData.Length) {
+            throw "Write-Ole2Stream: data truncated. Wrote $actualWritten of $($newData.Length) bytes. Sector chain too short."
         }
     }
 
@@ -531,8 +541,147 @@ showTab($firstHlIdx);
     [IO.File]::WriteAllText($outputPath, $html.ToString(), [System.Text.Encoding]::UTF8)
 }
 
+# ============================================================================
+# Input validation
+# ============================================================================
+
+function Resolve-VbaFilePath {
+    param([string]$Path, [string[]]$Supported = @('.xls','.xlsm','.xlam'))
+    if (-not (Test-Path $Path)) { throw "File not found: $Path" }
+    $resolved = (Resolve-Path $Path).Path
+    $ext = [IO.Path]::GetExtension($resolved).ToLower()
+    if ($ext -notin $Supported) { throw "Unsupported format: $ext (supported: $($Supported -join ', '))" }
+    return $resolved
+}
+
+# ============================================================================
+# Output management
+# ============================================================================
+
+function New-VbaOutputDir {
+    param([string]$InputFilePath, [string]$ToolName)
+    $inputDir = [IO.Path]::GetDirectoryName($InputFilePath)
+    $outputRoot = Join-Path $inputDir 'output'
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $runDir = Join-Path $outputRoot "${timestamp}_${ToolName}"
+    New-Item $runDir -ItemType Directory -Force | Out-Null
+    return $runDir
+}
+
+# ============================================================================
+# Logging and terminal display
+# ============================================================================
+
+function Write-VbaLog {
+    param([string]$ToolName, [string]$InputFile, [string]$Message, [string]$Level = 'INFO')
+    $logPath = Join-Path $PSScriptRoot '..\vba-toolkit.log'
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $fileName = [IO.Path]::GetFileName($InputFile)
+    $entry = "[$timestamp] [$Level] [$ToolName] $fileName | $Message"
+    [IO.File]::AppendAllText($logPath, "$entry`r`n", [System.Text.Encoding]::UTF8)
+}
+
+function Write-VbaStatus {
+    param([string]$ToolName, [string]$FileName, [string]$Message)
+    Write-Host "  $Message" -ForegroundColor Gray
+}
+
+function Write-VbaResult {
+    param([string]$ToolName, [string]$FileName, [string]$Summary, [string]$OutputDir, [double]$ElapsedSec)
+    Write-Host "  $Summary" -ForegroundColor Green
+    if ($OutputDir) { Write-Host "  Output: $OutputDir" -ForegroundColor Gray }
+    if ($ElapsedSec -gt 0) { Write-Host "  Done ($([Math]::Round($ElapsedSec, 1))s)" -ForegroundColor Gray }
+}
+
+function Write-VbaError {
+    param([string]$ToolName, [string]$FileName, [string]$Message)
+    Write-Host "  ERROR: $Message" -ForegroundColor Red
+    Write-VbaLog $ToolName $FileName $Message 'ERROR'
+}
+
+function Write-VbaHeader {
+    param([string]$ToolName, [string]$FileName)
+    Write-Host "[$ToolName] $FileName" -ForegroundColor Cyan
+}
+
+# ============================================================================
+# Codepage detection
+# ============================================================================
+
+function Get-VbaCodepage($ole2) {
+    $codepage = 932  # default fallback (Shift-JIS)
+    try {
+        $dirEntry = $ole2.Entries | Where-Object { $_.Name -eq 'dir' } | Select-Object -First 1
+        if (-not $dirEntry) { return $codepage }
+        $dirRaw = Read-Ole2Stream $ole2 $dirEntry
+        $dirData = Decompress-VBA $dirRaw 0
+        if ($dirData.Length -lt 8) { return $codepage }
+        # Scan for PROJECTCODEPAGE record (ID=0x0003)
+        $pos = 0
+        while ($pos + 6 -le $dirData.Length) {
+            $id = [BitConverter]::ToUInt16($dirData, $pos)
+            $size = [BitConverter]::ToInt32($dirData, $pos + 2)
+            if ($size -lt 0 -or $pos + 6 + $size -gt $dirData.Length) { break }
+            if ($id -eq 0x0003 -and $size -ge 2) {
+                $codepage = [BitConverter]::ToUInt16($dirData, $pos + 6)
+                break
+            }
+            $pos += 6 + $size
+            # Handle PROJECTVERSION (0x0009) non-standard format: 2 extra bytes for MinorVersion
+            if ($id -eq 0x0009) { $pos += 2 }
+        }
+    } catch {}
+    # Validate codepage
+    try { [System.Text.Encoding]::GetEncoding($codepage) | Out-Null } catch { $codepage = 932 }
+    return $codepage
+}
+
+# ============================================================================
+# Bulk module extraction
+# ============================================================================
+
+function Get-AllModuleCode {
+    param(
+        [string]$FilePath,
+        [switch]$StripAttributes,
+        [switch]$IncludeRawData
+    )
+    $proj = Get-VbaProjectBytes $FilePath
+    if (-not $proj.Bytes) { return $null }
+    $ole2 = Read-Ole2 $proj.Bytes
+    $codepage = Get-VbaCodepage $ole2
+    $encoding = [System.Text.Encoding]::GetEncoding($codepage)
+    $modules = Get-VbaModuleList $ole2
+    $result = [ordered]@{}
+    foreach ($mod in $modules) {
+        $mc = Get-VbaModuleCode $ole2 $mod.Name
+        if (-not $mc) { continue }
+        $code = $encoding.GetString((Decompress-VBA $mc.StreamData $mc.Offset))
+        # Re-decode with detected codepage if different from what Get-VbaModuleCode used
+        if ($codepage -ne 932) {
+            $rawBytes = Decompress-VBA $mc.StreamData $mc.Offset
+            $code = $encoding.GetString($rawBytes)
+        }
+        $lines = $code -split "`r`n|`n"
+        if ($StripAttributes) {
+            $lines = @($lines | Where-Object { $_ -notmatch '^\s*Attribute\s+VB_' })
+        }
+        $entry = @{ Code = ($lines -join "`n"); Ext = $mod.Ext; Lines = $lines; Name = $mod.Name }
+        if ($IncludeRawData) {
+            $entry.Entry = $mc.Entry
+            $entry.Offset = $mc.Offset
+            $entry.StreamData = $mc.StreamData
+        }
+        $result[$mod.Name] = $entry
+    }
+    return @{ Modules = $result; Ole2 = $ole2; Ole2Bytes = $proj.Bytes; IsZip = $proj.IsZip; Codepage = $codepage; FilePath = $FilePath }
+}
+
 Export-ModuleMember -Function Read-Ole2, Read-Ole2Stream, Write-Ole2Stream,
     Decompress-VBA, Compress-VBA,
     Get-VbaProjectBytes, Save-VbaProjectBytes,
     Get-VbaModuleList, Get-VbaModuleCode,
-    New-HtmlCodeView
+    New-HtmlCodeView,
+    Resolve-VbaFilePath, New-VbaOutputDir,
+    Write-VbaLog, Write-VbaStatus, Write-VbaResult, Write-VbaError, Write-VbaHeader,
+    Get-VbaCodepage, Get-AllModuleCode

@@ -1,15 +1,13 @@
-param(
-    [Parameter(Mandatory)][string]$FilePath
-)
-
+param([Parameter(Mandatory)][string]$FilePath)
 $ErrorActionPreference = 'Stop'
-
 Import-Module "$PSScriptRoot\VBAToolkit.psm1" -Force
 
-if (-not (Test-Path $FilePath)) { Write-Host "Error: file not found: $FilePath" -ForegroundColor Red; exit 1 }
-$FilePath = (Resolve-Path $FilePath).Path
-$ext = [IO.Path]::GetExtension($FilePath).ToLower()
-if ($ext -notin '.xls', '.xlsm', '.xlam') { Write-Host "Error: unsupported format: $ext" -ForegroundColor Red; exit 1 }
+$FilePath = Resolve-VbaFilePath $FilePath
+$fileName = [IO.Path]::GetFileName($FilePath)
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+Write-VbaHeader 'Cheatsheet' $fileName
+Write-VbaLog 'Cheatsheet' $FilePath 'Started'
 
 # ============================================================================
 # Win32 API replacement database
@@ -374,39 +372,34 @@ text = d.GetText
 # Scan file for API usage
 # ============================================================================
 
-Write-Host "Scanning: $FilePath"
+Write-VbaStatus 'Cheatsheet' $fileName "Scanning..."
 
-$proj = Get-VbaProjectBytes $FilePath
-if (-not $proj.Bytes) { Write-Host "No vbaProject.bin found." -ForegroundColor Yellow; exit 0 }
-$ole2 = Read-Ole2 $proj.Bytes
-$modules = Get-VbaModuleList $ole2
+$project = Get-AllModuleCode $FilePath -StripAttributes
+if (-not $project) { Write-VbaError 'Cheatsheet' $fileName 'No vbaProject.bin found'; exit 0 }
 
-$found = [ordered]@{}  # apiName -> @{ Decl = @{File;Line;Sig}; Calls = @(@{File;Line;Code}) }
+$found = [ordered]@{}
 
-foreach ($mod in $modules) {
-    $result = Get-VbaModuleCode $ole2 $mod.Name
-    if (-not $result) { continue }
-    $lines = ($result.Code -split "`r`n|`n")
-
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
+# Pass 1: find declarations
+foreach ($modName in $project.Modules.Keys) {
+    $mod = $project.Modules[$modName]
+    for ($i = 0; $i -lt $mod.Lines.Count; $i++) {
+        $line = $mod.Lines[$i]
         if ($line -match '^\s*''') { continue }
         if ($line -match '(?i)\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)') {
             $apiName = $Matches[3]
             if (-not $found.Contains($apiName)) {
                 $found[$apiName] = @{ Decl = $null; Calls = [System.Collections.ArrayList]::new() }
             }
-            $found[$apiName].Decl = @{ File = "$($mod.Name).$($mod.Ext)"; Line = $i + 1; Sig = $line.Trim() }
+            $found[$apiName].Decl = @{ File = "$modName.$($mod.Ext)"; Line = $i + 1; Sig = $line.Trim() }
         }
     }
 }
 
-# Find call sites
+# Pass 2: find call sites (single pass over all modules)
 foreach ($apiName in @($found.Keys)) {
-    foreach ($mod in $modules) {
-        $result = Get-VbaModuleCode $ole2 $mod.Name
-        if (-not $result) { continue }
-        $lines = ($result.Code -split "`r`n|`n")
+    foreach ($modName in $project.Modules.Keys) {
+        $mod = $project.Modules[$modName]
+        $lines = $mod.Lines
         for ($i = 0; $i -lt $lines.Count; $i++) {
             $line = $lines[$i]
             if ($line -match '^\s*''') { continue }
@@ -414,30 +407,29 @@ foreach ($apiName in @($found.Keys)) {
             if ($line -match "\b$([regex]::Escape($apiName))\b") {
                 $trimmed = $line.Trim()
                 if ($trimmed.Length -gt 100) { $trimmed = $trimmed.Substring(0, 97) + '...' }
-                [void]$found[$apiName].Calls.Add(@{ File = "$($mod.Name).$($mod.Ext)"; Line = $i + 1; Code = $trimmed })
+                [void]$found[$apiName].Calls.Add(@{ File = "$modName.$($mod.Ext)"; Line = $i + 1; Code = $trimmed })
             }
         }
     }
 }
 
 if ($found.Count -eq 0) {
-    Write-Host "No Win32 API declarations found." -ForegroundColor Cyan
+    Write-VbaStatus 'Cheatsheet' $fileName "No Win32 API declarations found"
+    Write-VbaLog 'Cheatsheet' $FilePath 'No API found'
     exit 0
 }
 
-Write-Host "Found $($found.Count) API(s)"
+Write-VbaStatus 'Cheatsheet' $fileName "Found $($found.Count) API(s)"
 
 # ============================================================================
 # Generate HTML — left: modules, center: code, right: API outline + hover tips
 # ============================================================================
 
-# Build code data per module (strip Attribute lines)
+# Build code data per module (already stripped via Get-AllModuleCode)
 $allModCode = [ordered]@{}
-foreach ($mod in $modules) {
-    $result = Get-VbaModuleCode $ole2 $mod.Name
-    if (-not $result) { continue }
-    $lines = ($result.Code -split "`r`n|`n") | Where-Object { $_ -notmatch '^\s*Attribute\s+VB_' }
-    $allModCode["$($mod.Name).$($mod.Ext)"] = @($lines)
+foreach ($modName in $project.Modules.Keys) {
+    $mod = $project.Modules[$modName]
+    $allModCode["$modName.$($mod.Ext)"] = @($mod.Lines)
 }
 
 # Build per-module highlight + tooltip data
@@ -731,14 +723,14 @@ showTab($firstHlIdx);
 </body></html>
 "@)
 
-$baseName = [IO.Path]::GetFileNameWithoutExtension($FilePath)
-$htmlPath = Join-Path ([IO.Path]::GetDirectoryName($FilePath)) "${baseName}_cheatsheet.html"
+$outDir = New-VbaOutputDir $FilePath 'cheatsheet'
+$htmlPath = Join-Path $outDir 'cheatsheet.html'
 [IO.File]::WriteAllText($htmlPath, $html.ToString(), [System.Text.Encoding]::UTF8)
 
 # Text log
 $text = [System.Text.StringBuilder]::new()
 [void]$text.AppendLine("# Win32 API Migration Cheatsheet")
-[void]$text.AppendLine("# Source: $([IO.Path]::GetFileName($FilePath))")
+[void]$text.AppendLine("# Source: $fileName")
 [void]$text.AppendLine("# Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
 [void]$text.AppendLine("")
 foreach ($apiName in $found.Keys) {
@@ -752,9 +744,10 @@ foreach ($apiName in $found.Keys) {
     foreach ($call in $f.Calls) { [void]$text.AppendLine("  Called:   $($call.File) L$($call.Line): $($call.Code)") }
     [void]$text.AppendLine("")
 }
-$textPath = Join-Path ([IO.Path]::GetDirectoryName($FilePath)) "${baseName}_cheatsheet.txt"
-[IO.File]::WriteAllText($textPath, $text.ToString(), [System.Text.Encoding]::UTF8)
+[IO.File]::WriteAllText((Join-Path $outDir 'cheatsheet.txt'), $text.ToString(), [System.Text.Encoding]::UTF8)
 
 Start-Process $htmlPath
-Write-Host "Cheatsheet: $htmlPath" -ForegroundColor Green
-Write-Host "Text log:   $textPath"
+
+$sw.Stop()
+Write-VbaResult 'Cheatsheet' $fileName "$($found.Count) API(s) documented" $outDir $sw.Elapsed.TotalSeconds
+Write-VbaLog 'Cheatsheet' $FilePath "$($found.Count) APIs | -> $outDir"

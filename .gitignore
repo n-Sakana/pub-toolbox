@@ -2,10 +2,15 @@
 *.xlsm
 *.xls
 ~$*
+output/
 *_vba/
 *_combined.txt
 *_sanitized.txt
 *_diff.txt
+*_cheatsheet.txt
+*_cheatsheet.html
+*_extract.html
+vba-toolkit.log
 
 # Allow test fixtures
 !vba-toolkit/test/*.xlsm

@@ -4,34 +4,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
 Import-Module "$PSScriptRoot\VBAToolkit.psm1" -Force
 
-foreach ($p in @($FileA, $FileB)) {
-    if (-not (Test-Path $p)) { Write-Host "Error: file not found: $p" -ForegroundColor Red; exit 1 }
-}
-$FileA = (Resolve-Path $FileA).Path
-$FileB = (Resolve-Path $FileB).Path
+$FileA = Resolve-VbaFilePath $FileA
+$FileB = Resolve-VbaFilePath $FileB
 $nameA = [IO.Path]::GetFileName($FileA)
 $nameB = [IO.Path]::GetFileName($FileB)
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-Write-Host "Comparing VBA code:"
-Write-Host "  A: $nameA"
-Write-Host "  B: $nameB"
-Write-Host ""
+Write-VbaHeader 'Diff' "$nameA vs $nameB"
+Write-VbaLog 'Diff' $FileA "Comparing with $nameB"
 
 function Get-AllModules([string]$path) {
-    $proj = Get-VbaProjectBytes $path
-    if (-not $proj.Bytes) { return @{} }
-    $ole2 = Read-Ole2 $proj.Bytes
-    $modules = Get-VbaModuleList $ole2
+    $project = Get-AllModuleCode $path -StripAttributes
+    if (-not $project) { return @{} }
     $result = [ordered]@{}
-    foreach ($mod in $modules) {
-        $mc = Get-VbaModuleCode $ole2 $mod.Name
-        if ($mc) {
-            $clean = (($mc.Code -split "`r`n|`n") | Where-Object { $_ -notmatch '^\s*Attribute\s+VB_' }) -join "`n"
-            $result[$mod.Name] = @{ Code = $clean.TrimStart("`n"); Ext = $mod.Ext }
-        }
+    foreach ($modName in $project.Modules.Keys) {
+        $mod = $project.Modules[$modName]
+        $result[$modName] = @{ Code = ($mod.Lines -join "`n"); Ext = $mod.Ext }
     }
     return $result
 }
@@ -311,12 +301,22 @@ showTab($firstModifiedIdx);
 </body></html>
 "@)
 
-$dirA = [IO.Path]::GetDirectoryName($FileA)
-$baseA = [IO.Path]::GetFileNameWithoutExtension($FileA)
-$baseB = [IO.Path]::GetFileNameWithoutExtension($FileB)
-$htmlPath = Join-Path $dirA "${baseA}_vs_${baseB}_diff.html"
+$outDir = New-VbaOutputDir $FileA 'diff'
+$htmlPath = Join-Path $outDir 'diff.html'
 [IO.File]::WriteAllText($htmlPath, $html.ToString(), [System.Text.Encoding]::UTF8)
-Write-Host "Report: $htmlPath" -ForegroundColor Green
 
-# Open in browser
+# Text report
+$textReport = [System.Text.StringBuilder]::new()
+[void]$textReport.AppendLine("# VBA Diff Report")
+[void]$textReport.AppendLine("# A: $nameA")
+[void]$textReport.AppendLine("# B: $nameB")
+[void]$textReport.AppendLine("# Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+[void]$textReport.AppendLine("")
+[void]$textReport.AppendLine("Added: $added, Removed: $removed, Modified: $modified, Unchanged: $unchanged")
+[IO.File]::WriteAllText((Join-Path $outDir 'diff.txt'), $textReport.ToString(), [System.Text.Encoding]::UTF8)
+
 Start-Process $htmlPath
+
+$sw.Stop()
+Write-VbaResult 'Diff' "$nameA vs $nameB" "$($parts -join ', ')" $outDir $sw.Elapsed.TotalSeconds
+Write-VbaLog 'Diff' $FileA "vs $nameB | $($parts -join ', ') | -> $outDir"
