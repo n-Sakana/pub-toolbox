@@ -134,135 +134,76 @@ Private Function RemovePasswordXls(ByVal filePath As String) As Boolean
 End Function
 
 ' --- .xlsm / .xlam (OOXML ZIP) のパスワード解除 ---
-'     ZIP内の vbaProject.bin を展開し、同様に DPB= を書き換える
+'     Excel 自身で一時的に .xls (OLE2) 形式に変換し、
+'     バイナリパッチを適用してから .xlsm に戻す
+'     外部プロセスを使わないため EDR にブロックされない
 Private Function RemovePasswordXlsm(ByVal filePath As String) As Boolean
     Dim fso As Object
-    Dim shellApp As Object
-    Dim tempFolder As String
-    Dim zipPath As String
-    Dim vbaProjPath As String
+    Dim tempXlsPath As String
+    Dim wb As Workbook
+    Dim origAlerts As Boolean
+    Dim origEvents As Boolean
+    Dim ext As String
 
     RemovePasswordXlsm = False
 
     Set fso = CreateObject("Scripting.FileSystemObject")
-    Set shellApp = CreateObject("Shell.Application")
 
-    ' 一時フォルダ作成
-    tempFolder = fso.GetSpecialFolder(2).Path & "\" & _
-                 "VBAPwdRemover_" & Format(Now, "yyyymmddhhnnss")
-    If Not fso.FolderExists(tempFolder) Then fso.CreateFolder tempFolder
+    ' 一時 .xls ファイルのパス
+    tempXlsPath = fso.GetSpecialFolder(2).Path & "\" & _
+                  "VBAPwdRemover_" & Format(Now, "yyyymmddhhnnss") & ".xls"
 
-    ' ZIP としてコピー
-    zipPath = tempFolder & "\temp.zip"
-    fso.CopyFile filePath, zipPath
+    ' ダイアログ・イベント抑制
+    origAlerts = Application.DisplayAlerts
+    origEvents = Application.EnableEvents
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
 
-    ' ZIP を展開
-    Dim extractFolder As String
-    extractFolder = tempFolder & "\extracted"
-    fso.CreateFolder extractFolder
+    On Error GoTo ErrHandler
 
-    Dim zipItems As Object
-    Set zipItems = shellApp.Namespace(zipPath).Items
+    ' 対象ファイルを開いて .xls 形式で保存
+    Set wb = Workbooks.Open(filePath, UpdateLinks:=0, ReadOnly:=False)
+    wb.SaveAs tempXlsPath, xlExcel8  ' .xls (OLE2) 形式
+    wb.Close SaveChanges:=False
 
-    shellApp.Namespace(extractFolder).CopyHere zipItems, 16 + 4  ' 上書き + 非表示
-
-    ' Shell.Application の CopyHere は非同期のため完了を待機
-    WaitForExtraction extractFolder, zipItems.Count
-
-    ' vbaProject.bin を検索
-    vbaProjPath = FindVbaProjectBin(fso, extractFolder)
-    If vbaProjPath = "" Then
-        CleanupTempFolder fso, tempFolder
-        Exit Function
+    ' .xls のバイナリを直接パッチ (OLE2 なので DPB= が平文で存在)
+    If Not RemovePasswordXls(tempXlsPath) Then
+        ' パッチ失敗 → 一時ファイル削除して終了
+        On Error Resume Next
+        fso.DeleteFile tempXlsPath, True
+        On Error GoTo 0
+        GoTo Cleanup
     End If
 
-    ' vbaProject.bin 内の DPB= を書き換え
-    If Not PatchDPBInFile(vbaProjPath) Then
-        CleanupTempFolder fso, tempFolder
-        Exit Function
+    ' パッチ済み .xls を開いて元の形式で保存し直す
+    Set wb = Workbooks.Open(tempXlsPath, UpdateLinks:=0, ReadOnly:=False)
+
+    ext = LCase(fso.GetExtensionName(filePath))
+    If ext = "xlam" Then
+        wb.SaveAs filePath, xlOpenXMLAddIn  ' .xlam
+    Else
+        wb.SaveAs filePath, xlOpenXMLWorkbookMacroEnabled  ' .xlsm
     End If
+    wb.Close SaveChanges:=False
 
-    ' 再ZIP化: 展開フォルダの中身を新しいZIPにまとめる
-    Dim newZipPath As String
-    newZipPath = tempFolder & "\patched.zip"
-    CreateEmptyZip newZipPath
-
-    Dim srcFolder As Object
-    Set srcFolder = shellApp.Namespace(extractFolder)
-
-    shellApp.Namespace(newZipPath).CopyHere srcFolder.Items, 16 + 4
-
-    ' ZIP化完了を待機
-    WaitForZip newZipPath, fso
-
-    ' 元ファイルを差し替え
-    fso.CopyFile newZipPath, filePath, True
-
-    ' 一時フォルダ削除
-    CleanupTempFolder fso, tempFolder
+    ' 一時ファイル削除
+    On Error Resume Next
+    fso.DeleteFile tempXlsPath, True
+    On Error GoTo 0
 
     RemovePasswordXlsm = True
-End Function
+    GoTo Cleanup
 
-' --- vbaProject.bin をフォルダ内から再帰検索 ---
-Private Function FindVbaProjectBin(ByRef fso As Object, ByVal folderPath As String) As String
-    Dim fld As Object
-    Dim f As Object
-    Dim sub_ As Object
+ErrHandler:
+    ' エラー時: ブックが開いていたら閉じる
+    On Error Resume Next
+    If Not wb Is Nothing Then wb.Close SaveChanges:=False
+    fso.DeleteFile tempXlsPath, True
+    On Error GoTo 0
 
-    FindVbaProjectBin = ""
-
-    Set fld = fso.GetFolder(folderPath)
-
-    For Each f In fld.Files
-        If LCase(f.Name) = "vbaproject.bin" Then
-            FindVbaProjectBin = f.Path
-            Exit Function
-        End If
-    Next f
-
-    For Each sub_ In fld.SubFolders
-        FindVbaProjectBin = FindVbaProjectBin(fso, sub_.Path)
-        If FindVbaProjectBin <> "" Then Exit Function
-    Next sub_
-End Function
-
-' --- ファイル内の DPB= を DPx= に書き換え ---
-Private Function PatchDPBInFile(ByVal filePath As String) As Boolean
-    Dim fileNum As Integer
-    Dim fileData() As Byte
-    Dim fileLen As Long
-
-    PatchDPBInFile = False
-
-    fileNum = FreeFile
-    Open filePath For Binary Access Read As #fileNum
-    fileLen = LOF(fileNum)
-    If fileLen = 0 Then
-        Close #fileNum
-        Exit Function
-    End If
-    ReDim fileData(0 To fileLen - 1)
-    Get #fileNum, , fileData
-    Close #fileNum
-
-    Dim targetBytes() As Byte
-    targetBytes = StrConv("DPB=", vbFromUnicode)
-
-    Dim pos As Long
-    pos = FindBytes(fileData, targetBytes)
-
-    If pos = -1 Then Exit Function
-
-    ' DPB= → DPx=
-    fileData(pos + 2) = &H78
-
-    fileNum = FreeFile
-    Open filePath For Binary Access Write As #fileNum
-    Put #fileNum, , fileData
-    Close #fileNum
-
-    PatchDPBInFile = True
+Cleanup:
+    Application.DisplayAlerts = origAlerts
+    Application.EnableEvents = origEvents
 End Function
 
 ' --- バイト配列内でパターンを検索 ---
@@ -293,60 +234,3 @@ Private Function FindBytes(ByRef data() As Byte, ByRef pattern() As Byte) As Lon
         End If
     Next i
 End Function
-
-' --- 空のZIPファイルを作成 ---
-Private Sub CreateEmptyZip(ByVal zipPath As String)
-    Dim fileNum As Integer
-    fileNum = FreeFile
-    Open zipPath For Output As #fileNum
-    ' ZIP ファイルの最小ヘッダー (End of Central Directory Record)
-    Print #fileNum, Chr(80) & Chr(75) & Chr(5) & Chr(6) & String(18, Chr(0))
-    Close #fileNum
-End Sub
-
-' --- Shell.Application の非同期展開を待機 ---
-Private Sub WaitForExtraction(ByVal folderPath As String, ByVal expectedCount As Long)
-    Dim fso As Object
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    Dim elapsed As Long
-    elapsed = 0
-    Do
-        Application.Wait Now + TimeSerial(0, 0, 1)
-        elapsed = elapsed + 1
-        If elapsed > 60 Then Exit Do  ' 最大60秒
-        If fso.GetFolder(folderPath).Files.Count + _
-           fso.GetFolder(folderPath).SubFolders.Count >= expectedCount Then Exit Do
-    Loop
-End Sub
-
-' --- ZIP化完了を待機 ---
-Private Sub WaitForZip(ByVal zipPath As String, ByRef fso As Object)
-    Dim prevSize As Long
-    Dim currSize As Long
-    Dim stableCount As Long
-
-    prevSize = 0
-    stableCount = 0
-
-    Do
-        Application.Wait Now + TimeSerial(0, 0, 1)
-        currSize = fso.GetFile(zipPath).Size
-        If currSize = prevSize And currSize > 22 Then
-            stableCount = stableCount + 1
-            If stableCount >= 3 Then Exit Do
-        Else
-            stableCount = 0
-        End If
-        prevSize = currSize
-        If stableCount > 30 Then Exit Do  ' 最大30秒
-    Loop
-End Sub
-
-' --- 一時フォルダ削除 ---
-Private Sub CleanupTempFolder(ByRef fso As Object, ByVal folderPath As String)
-    On Error Resume Next
-    If fso.FolderExists(folderPath) Then
-        fso.DeleteFolder folderPath, True
-    End If
-    On Error GoTo 0
-End Sub

@@ -9,6 +9,7 @@ if (-not (Test-Path $FilePath)) {
     exit 1
 }
 
+$FilePath = (Resolve-Path $FilePath).Path
 $ext = [IO.Path]::GetExtension($FilePath).ToLower()
 if ($ext -notin '.xls', '.xlsm', '.xlam') {
     Write-Host "Error: unsupported format: $ext" -ForegroundColor Red
@@ -34,70 +35,65 @@ function Find-DPB([byte[]]$data) {
     return -1
 }
 
-function Patch-DPB([byte[]]$data, [long]$pos) {
+function Patch-XlsFile([string]$path) {
+    $data = [IO.File]::ReadAllBytes($path)
+    $pos = Find-DPB $data
+    if ($pos -eq -1) { return $false }
+    # DPB= -> DPx=
     $data[$pos + 2] = 0x78
+    [IO.File]::WriteAllBytes($path, $data)
+    return $true
 }
 
 if ($ext -eq '.xls') {
-    # OLE2: DPB= is in raw bytes
-    $data = [IO.File]::ReadAllBytes($FilePath)
-    $pos = Find-DPB $data
-    if ($pos -eq -1) {
-        Write-Host "`nNo VBA password hash (DPB=) found." -ForegroundColor Yellow
-        exit 0
-    }
-    Patch-DPB $data $pos
-    [IO.File]::WriteAllBytes($FilePath, $data)
+    # OLE2: patch directly
+    $result = Patch-XlsFile $FilePath
 } else {
-    # OOXML: vbaProject.bin is compressed inside ZIP
-    Add-Type -AssemblyName System.IO.Compression
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    # OOXML: use Excel to convert to .xls, patch, convert back
+    $tempXls = Join-Path ([IO.Path]::GetTempPath()) "VBAPwdRemover_$(Get-Date -Format yyyyMMddHHmmss).xls"
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    $excel.EnableEvents = $false
 
-    # Use ScriptBlock::Create to defer type resolution past Add-Type
-    $block = [ScriptBlock]::Create('
-        param($path, $findDPB, $patchDPB)
-        $zip = [System.IO.Compression.ZipFile]::Open($path, [System.IO.Compression.ZipArchiveMode]::Update)
-        try {
-            $entry = $zip.Entries | Where-Object { $_.Name -eq "vbaProject.bin" } | Select-Object -First 1
-            if (-not $entry) { return $false }
+    try {
+        # Open and save as .xls (OLE2) - xlExcel8 = 56
+        $wb = $excel.Workbooks.Open($FilePath, 0, $false)
+        $wb.SaveAs($tempXls, 56)
+        $wb.Close($false)
 
-            $stream = $entry.Open()
-            $ms = New-Object IO.MemoryStream
-            $stream.CopyTo($ms)
-            $stream.Close()
-            $data = $ms.ToArray()
-            $ms.Close()
+        # Patch the .xls binary
+        $result = Patch-XlsFile $tempXls
 
-            $pos = & $findDPB $data
-            if ($pos -eq -1) { return $false }
-
-            & $patchDPB $data $pos
-
-            $stream = $entry.Open()
-            $stream.SetLength(0)
-            $stream.Write($data, 0, $data.Length)
-            $stream.Close()
-
-            return $true
+        if ($result) {
+            # Open patched .xls and save back as original format
+            $wb = $excel.Workbooks.Open($tempXls, 0, $false)
+            if ($ext -eq '.xlam') {
+                $wb.SaveAs($FilePath, 55)  # xlOpenXMLAddIn
+            } else {
+                $wb.SaveAs($FilePath, 52)  # xlOpenXMLWorkbookMacroEnabled
+            }
+            $wb.Close($false)
         }
-        finally {
-            $zip.Dispose()
-        }
-    ')
-
-    $result = & $block $FilePath ${function:Find-DPB} ${function:Patch-DPB}
-
-    if (-not $result) {
-        Write-Host "`nNo VBA password hash (DPB=) found." -ForegroundColor Yellow
-        exit 0
+    }
+    finally {
+        $excel.Quit()
+        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null
+        Remove-Item $tempXls -Force -ErrorAction SilentlyContinue
     }
 }
 
-Write-Host ""
-Write-Host "VBA password protection disabled." -ForegroundColor Green
-Write-Host ""
-Write-Host "To fully remove, open the file and:"
-Write-Host "  1. Open VBE (Alt+F11)"
-Write-Host "  2. Tools > VBAProject Properties > Protection tab"
-Write-Host "  3. Clear the password fields and click OK"
-Write-Host "  4. Save the file"
+if ($result) {
+    Write-Host ""
+    Write-Host "VBA password protection disabled." -ForegroundColor Green
+    Write-Host ""
+    Write-Host "To fully remove, open the file and:"
+    Write-Host "  1. Open VBE (Alt+F11)"
+    Write-Host "  2. Tools > VBAProject Properties > Protection tab"
+    Write-Host "  3. Clear the password fields and click OK"
+    Write-Host "  4. Save the file"
+} else {
+    Write-Host ""
+    Write-Host "No VBA password hash (DPB=) found in this file." -ForegroundColor Yellow
+    Write-Host "The file may not contain a VBA project."
+}
