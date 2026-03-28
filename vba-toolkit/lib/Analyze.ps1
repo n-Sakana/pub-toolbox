@@ -134,6 +134,622 @@ function Save-AnalyzeConfig {
 }
 
 # ============================================================================
+# Internal analysis functions
+# ============================================================================
+
+function Invoke-SanitizePass {
+    param(
+        [hashtable]$Project,
+        [System.Collections.ArrayList]$SanitizeRules,
+        [System.Collections.ArrayList]$DeclaredNames,
+        [System.Text.Encoding]$Encoding,
+        [byte[]]$Ole2Bytes
+    )
+    $totalSanitized = 0
+    $sanitizedLineMap = @{}
+
+    foreach ($modName in $Project.Modules.Keys) {
+        $md = $Project.Modules[$modName]
+        if (-not $md.Entry) { continue }
+        $lines = $md.Code -split "`r`n|`n"
+        $changes = 0
+
+        for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -match '^\s*''') { continue }
+            $matched = $false; $ruleName = ''; $prefix = "' [EDR] "
+            foreach ($rule in $SanitizeRules) {
+                if ($lines[$i] -match $rule.Pattern) { $matched = $true; $ruleName = $rule.Name; $prefix = $rule.Prefix; break }
+            }
+            if (-not $matched -and $DeclaredNames.Count -gt 0) {
+                foreach ($apiName in $DeclaredNames) {
+                    if ($lines[$i] -match "\b$([regex]::Escape($apiName))\b") { $matched = $true; $ruleName = "Call to $apiName"; $prefix = "' [EDR] "; break }
+                }
+            }
+            if ($matched) {
+                $lines[$i] = $prefix + $lines[$i].TrimStart()
+                $changes++
+                $sanitizedLineMap["${modName}:$i"] = $ruleName
+            }
+        }
+
+        if ($changes -eq 0) { continue }
+        $totalSanitized += $changes
+
+        $newCode = $lines -join "`r`n"
+        $newCodeBytes = $Encoding.GetBytes($newCode)
+        $newCompressed = Compress-VBA $newCodeBytes
+
+        $prefixBytes = New-Object byte[] $md.Offset
+        [Array]::Copy($md.StreamData, $prefixBytes, $md.Offset)
+        $newStream = New-Object byte[] ($prefixBytes.Length + $newCompressed.Length)
+        [Array]::Copy($prefixBytes, $newStream, $prefixBytes.Length)
+        [Array]::Copy($newCompressed, 0, $newStream, $prefixBytes.Length, $newCompressed.Length)
+
+        Write-Ole2Stream $Ole2Bytes $Project.Ole2 $md.Entry $newStream
+
+        # Update module lines in project for HTML/report generation
+        $md.Lines = $lines
+        $md.Code = $newCode
+    }
+
+    return @{
+        TotalSanitized = $totalSanitized
+        SanitizedLineMap = $sanitizedLineMap
+    }
+}
+
+function Build-AnalyzeTextReport {
+    param(
+        [hashtable]$Analysis,
+        [hashtable]$AllModLines,
+        [System.Collections.Specialized.OrderedDictionary]$CsvRow,
+        [string]$FileName,
+        [int]$TotalSanitized,
+        [hashtable]$Replacements
+    )
+    $txtSb = [System.Text.StringBuilder]::new()
+    [void]$txtSb.AppendLine("# VBA Analysis Report")
+    [void]$txtSb.AppendLine("# Source: $FileName")
+    [void]$txtSb.AppendLine("# Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+    [void]$txtSb.AppendLine("")
+    [void]$txtSb.AppendLine("## Modules ($($CsvRow.TotalModules))")
+    foreach ($modName in $AllModLines.Keys) {
+        $ml = $AllModLines[$modName]
+        [void]$txtSb.AppendLine("  $modName.$($ml.Ext) ($($ml.Lines.Count) lines)")
+    }
+    [void]$txtSb.AppendLine("  Total: $($CsvRow.CodeLines) lines")
+    [void]$txtSb.AppendLine("")
+
+    if ($Analysis.Findings.Count -gt 0) {
+        [void]$txtSb.AppendLine("## EDR Risks ($($Analysis.IssueCount))")
+        foreach ($cat in $Analysis.Findings.Keys) {
+            $f = $Analysis.Findings[$cat]
+            [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
+            if ($f.Aggregate) {
+                [void]$txtSb.AppendLine("    (aggregated: $($f.Findings.Count) occurrences)")
+            } else {
+                foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
+            }
+        }
+        [void]$txtSb.AppendLine("")
+    }
+
+    if ($Analysis.CompatFindings.Count -gt 0) {
+        [void]$txtSb.AppendLine("## Compatibility Risks ($($Analysis.CompatIssueCount))")
+        foreach ($cat in $Analysis.CompatFindings.Keys) {
+            $f = $Analysis.CompatFindings[$cat]
+            [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
+            foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
+        }
+        [void]$txtSb.AppendLine("")
+    }
+
+    if ($Analysis.EnvFindings.Count -gt 0) {
+        [void]$txtSb.AppendLine("## Environment Risks ($($Analysis.EnvIssueCount))")
+        foreach ($cat in $Analysis.EnvFindings.Keys) {
+            $f = $Analysis.EnvFindings[$cat]
+            [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
+            foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
+        }
+        [void]$txtSb.AppendLine("")
+    }
+
+    if ($Analysis.BizFindings.Count -gt 0) {
+        [void]$txtSb.AppendLine("## Business Risks ($($Analysis.BizIssueCount))")
+        foreach ($cat in $Analysis.BizFindings.Keys) {
+            $f = $Analysis.BizFindings[$cat]
+            [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
+            foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
+        }
+        [void]$txtSb.AppendLine("")
+    }
+
+    if ($Analysis.InfoFindings.Count -gt 0) {
+        [void]$txtSb.AppendLine("## Info (Reference) ($($Analysis.InfoCount))")
+        foreach ($cat in $Analysis.InfoFindings.Keys) {
+            $f = $Analysis.InfoFindings[$cat]
+            [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
+            foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
+        }
+        [void]$txtSb.AppendLine("")
+    }
+
+    if ($Analysis.ComBindings.Count -gt 0) {
+        [void]$txtSb.AppendLine("## COM Object Usage Details")
+        $comByProg = @{}
+        foreach ($b in $Analysis.ComBindings) {
+            if (-not $comByProg.ContainsKey($b.ProgId)) { $comByProg[$b.ProgId] = [System.Collections.ArrayList]::new() }
+            [void]$comByProg[$b.ProgId].Add($b)
+        }
+        foreach ($prog in $comByProg.Keys) {
+            [void]$txtSb.AppendLine("  $prog")
+            foreach ($b in $comByProg[$prog]) {
+                [void]$txtSb.AppendLine("    $($b.File) L$($b.Line): Set $($b.VarName) = ...")
+            }
+        }
+        [void]$txtSb.AppendLine("")
+    }
+
+    if ($Analysis.ApiDecls.Count -gt 0) {
+        [void]$txtSb.AppendLine("## Win32 API Usage Details")
+        foreach ($decl in $Analysis.ApiDecls) {
+            [void]$txtSb.AppendLine("  $($decl.Name)")
+            [void]$txtSb.AppendLine("    $($decl.File) L$($decl.Line): $($decl.Sig)")
+            $info = $Replacements[$decl.Name]
+            if ($info) { [void]$txtSb.AppendLine("    Alternative: $($info.Alt)") }
+        }
+        [void]$txtSb.AppendLine("")
+    }
+
+    if ($Analysis.ExternalRefs.Count -gt 0) {
+        [void]$txtSb.AppendLine("## External References ($($Analysis.ExternalRefs.Count))")
+        foreach ($ref in $Analysis.ExternalRefs) { [void]$txtSb.AppendLine("  $ref") }
+        [void]$txtSb.AppendLine("")
+    }
+
+    [void]$txtSb.AppendLine("## Summary")
+    [void]$txtSb.AppendLine("  $($CsvRow.EdrIssues) EDR, $($CsvRow.CompatIssues) compat, $($CsvRow.EnvIssues) env, $($CsvRow.BizIssues) biz, $($CsvRow.InfoCount) info, $TotalSanitized sanitized")
+    [void]$txtSb.AppendLine("  RiskLevel: $($CsvRow.RiskLevel) | MigrationClass: $($CsvRow.MigrationClass)")
+    [void]$txtSb.AppendLine("  PrimaryConcern: $($CsvRow.PrimaryConcern) | NeedsReviewBy: $($CsvRow.NeedsReviewBy)")
+
+    return $txtSb.ToString()
+}
+
+function Build-AnalyzeCsvRow {
+    param(
+        [hashtable]$Analysis,
+        [hashtable]$Project,
+        [string]$FileName,
+        [string]$RelPath,
+        [int]$TotalSanitized,
+        [hashtable]$Replacements
+    )
+
+    # Module counts
+    $bas = 0; $cls = 0; $frm = 0; $totalModules = 0; $codeLines = 0
+    foreach ($modName in $Project.Modules.Keys) {
+        $mod = $Project.Modules[$modName]
+        $totalModules++
+        switch ($mod.Ext) { 'bas' { $bas++ } 'cls' { $cls++ } 'frm' { $frm++ } }
+        $codeLines += $mod.Lines.Count
+    }
+
+    # GUI operation APIs
+    $guiApiNames = @('FindWindow','SendMessage','PostMessage','keybd_event','mouse_event')
+    $hasGuiApi = $false
+    $hasPsWScript = $false
+    $hasWin32NonGui = $false
+    $hasDao = $false
+    foreach ($decl in $Analysis.ApiDecls) {
+        if ($guiApiNames -contains $decl.Name) { $hasGuiApi = $true }
+        else { $hasWin32NonGui = $true }
+    }
+    if ($Analysis.Findings.Contains('PowerShell / WScript')) { $hasPsWScript = $true }
+    if ($Analysis.CompatFindings.Contains('Deprecated: DAO')) { $hasDao = $true }
+
+    # RiskLevel
+    $riskLevel = 'Low'
+    if ($hasGuiApi -or $hasPsWScript) { $riskLevel = 'High' }
+    elseif ($hasWin32NonGui -or $hasDao) { $riskLevel = 'Medium' }
+
+    # Check for path-related env issues
+    $pathPatterns = @('Fixed drive letter','UNC path','User folder','Desktop / Documents','AppData','Program Files','External workbook open (literal)')
+    $hasPathIssue = $false
+    foreach ($pp in $pathPatterns) {
+        if ($Analysis.EnvFindings.Contains($pp)) { $hasPathIssue = $true; break }
+    }
+
+    # MigrationClass
+    $migClasses = [System.Collections.ArrayList]::new()
+    $totalAllIssues = $Analysis.IssueCount + $Analysis.CompatIssueCount + $Analysis.EnvIssueCount + $Analysis.BizIssueCount
+    if ($totalAllIssues -eq 0) {
+        [void]$migClasses.Add('NoChange')
+    } else {
+        if ($hasGuiApi -or $hasPsWScript -or $Analysis.Findings.Contains('Shell / process')) {
+            [void]$migClasses.Add('Rebuild')
+        }
+        if ($hasWin32NonGui -or $hasDao) {
+            [void]$migClasses.Add('NeedsReplacement')
+        }
+        $hasCompatOnly = ($Analysis.CompatIssueCount -gt 0) -and -not $hasWin32NonGui -and -not $hasDao -and -not $hasGuiApi -and -not $hasPsWScript -and ($Analysis.IssueCount -eq 0)
+        if ($hasCompatOnly -and $Analysis.EnvIssueCount -eq 0 -and $Analysis.BizIssueCount -eq 0) {
+            [void]$migClasses.Add('MinorFix')
+        } elseif ($Analysis.CompatIssueCount -gt 0 -and $migClasses.Count -eq 0) {
+            [void]$migClasses.Add('MinorFix')
+        }
+        if ($hasPathIssue) {
+            [void]$migClasses.Add('StorageReview')
+        }
+        if ($migClasses.Count -eq 0) {
+            [void]$migClasses.Add('MinorFix')
+        }
+    }
+
+    # PrimaryConcern
+    $primaryConcern = 'Other'
+    if ($hasGuiApi) { $primaryConcern = 'GUI' }
+    elseif ($hasPsWScript -or $Analysis.Findings.Contains('Shell / process')) { $primaryConcern = 'Process' }
+    elseif ($hasPathIssue) { $primaryConcern = 'StorageMigration' }
+    elseif ($hasDao -or $Analysis.BizFindings.Contains('Access / DB integration') -or $Analysis.EnvFindings.Contains('Connection string')) { $primaryConcern = 'DB' }
+    elseif ($Analysis.BizFindings.Contains('Outlook integration') -or $Analysis.BizFindings.Contains('Word integration') -or $Analysis.BizFindings.Contains('External EXE')) { $primaryConcern = 'COM' }
+    elseif ($Analysis.Findings.Contains('Network / HTTP') -or $Analysis.EnvFindings.Contains('Fixed IP address') -or $Analysis.EnvFindings.Contains('localhost') -or $Analysis.EnvFindings.Contains('Fixed connection host')) { $primaryConcern = 'Network' }
+    elseif ($Analysis.BizFindings.Contains('Outlook integration')) { $primaryConcern = 'Mail' }
+    elseif ($Analysis.Findings.Contains('File I/O') -or $Analysis.Findings.Contains('FileSystemObject')) { $primaryConcern = 'File' }
+    elseif ($totalAllIssues -gt 0) { $primaryConcern = 'Other' }
+
+    # NeedsReviewBy
+    $reviewers = [System.Collections.ArrayList]::new()
+    if ($Analysis.IssueCount -gt 0) { [void]$reviewers.Add('Security') }
+    if ($Analysis.EnvIssueCount -gt 0 -or $Analysis.EnvFindings.Contains('Fixed printer name')) { [void]$reviewers.Add('Infra') }
+    if ($hasDao -or $Analysis.BizFindings.Contains('Access / DB integration') -or $Analysis.EnvFindings.Contains('Connection string')) { [void]$reviewers.Add('DB') }
+    if ($Analysis.BizFindings.Contains('Outlook integration') -or $Analysis.BizFindings.Contains('Word integration') -or $Analysis.BizFindings.Contains('External EXE')) { [void]$reviewers.Add('BusinessOwner') }
+    if ($Analysis.BizFindings.Contains('Print') -or $Analysis.BizFindings.Contains('PDF export') -or $Analysis.EnvFindings.Contains('Fixed printer name')) { [void]$reviewers.Add('ClientPC') }
+    if ($Analysis.CompatIssueCount -gt 0 -and $reviewers.Count -eq 0) { [void]$reviewers.Add('Developer') }
+    elseif ($Analysis.CompatIssueCount -gt 0) { [void]$reviewers.Add('Developer') }
+
+    # TopApiNames
+    $topApis = [System.Collections.ArrayList]::new()
+    foreach ($d in $Analysis.ApiDecls) {
+        if ($guiApiNames -contains $d.Name -and $topApis -notcontains $d.Name) { [void]$topApis.Add($d.Name) }
+    }
+    foreach ($d in $Analysis.ApiDecls) {
+        if ($guiApiNames -notcontains $d.Name -and $topApis -notcontains $d.Name) { [void]$topApis.Add($d.Name) }
+    }
+
+    # TopComProgIds
+    $topCom = [System.Collections.ArrayList]::new()
+    foreach ($b in $Analysis.ComBindings) {
+        if ($topCom -notcontains $b.ProgId) { [void]$topCom.Add($b.ProgId) }
+    }
+
+    # SampleEvidence
+    $sampleEvidence = ''
+    $evidenceSources = @(
+        @{ Key = 'Win32 API (Declare)'; Coll = $Analysis.Findings }
+        @{ Key = 'Shell / process'; Coll = $Analysis.Findings }
+        @{ Key = 'PowerShell / WScript'; Coll = $Analysis.Findings }
+        @{ Key = 'Fixed drive letter'; Coll = $Analysis.EnvFindings }
+        @{ Key = 'UNC path'; Coll = $Analysis.EnvFindings }
+        @{ Key = 'Connection string'; Coll = $Analysis.EnvFindings }
+        @{ Key = 'Access / DB integration'; Coll = $Analysis.BizFindings }
+        @{ Key = 'Outlook integration'; Coll = $Analysis.BizFindings }
+        @{ Key = 'Network / HTTP'; Coll = $Analysis.Findings }
+        @{ Key = 'File I/O'; Coll = $Analysis.Findings }
+    )
+    foreach ($src in $evidenceSources) {
+        if ($src.Coll.Contains($src.Key) -and $src.Coll[$src.Key].Findings.Count -gt 0) {
+            $raw = $src.Coll[$src.Key].Findings[0]
+            if ($raw.Length -gt 100) { $raw = $raw.Substring(0, 97) + '...' }
+            $sampleEvidence = $raw
+            break
+        }
+    }
+
+    # Column-definition based CSV row
+    $csvColumns = [ordered]@{
+        Timestamp       = { Get-Date -Format 'yyyy-MM-dd HH:mm:ss' }
+        RelativePath    = { [IO.Path]::GetDirectoryName($RelPath) }
+        FileName        = { $FileName }
+        Bas             = { $bas }
+        Cls             = { $cls }
+        Frm             = { $frm }
+        TotalModules    = { $totalModules }
+        CodeLines       = { $codeLines }
+        EdrIssues       = { $Analysis.IssueCount }
+        CompatIssues    = { $Analysis.CompatIssueCount }
+        SanitizedLines  = { $TotalSanitized }
+        References      = { $Analysis.ExternalRefs -join '; ' }
+        Error           = { '' }
+        EnvIssues       = { $Analysis.EnvIssueCount }
+        BizIssues       = { $Analysis.BizIssueCount }
+        InfoCount       = { $Analysis.InfoCount }
+        RiskLevel       = { $riskLevel }
+        MigrationClass  = { $migClasses -join '; ' }
+        PrimaryConcern  = { $primaryConcern }
+        NeedsReviewBy   = { $reviewers -join '; ' }
+        TopApiNames     = { ($topApis | Select-Object -First 3) -join '; ' }
+        TopComProgIds   = { ($topCom | Select-Object -First 3) -join '; ' }
+        SampleEvidence  = { $sampleEvidence }
+    }
+
+    $row = [ordered]@{}
+    foreach ($col in $csvColumns.Keys) {
+        $row[$col] = & $csvColumns[$col]
+    }
+    return $row
+}
+
+function Build-AnalyzeHtml {
+    param(
+        [hashtable]$AllModLines,
+        [hashtable]$ModHighlights,
+        [System.Collections.Specialized.OrderedDictionary]$TooltipEntries,
+        [string]$OutPrefix,
+        [string]$FileName,
+        [System.Collections.Specialized.OrderedDictionary]$CsvRow,
+        [int]$TotalSanitized,
+        [string]$OutDir,
+        [hashtable]$PatternDefs
+    )
+
+    $he = { param($s) [System.Net.WebUtility]::HtmlEncode($s) }
+
+    # Build sidebar
+    $sidebarSb = [System.Text.StringBuilder]::new()
+    $modIdx = 0; $firstHlIdx = -1
+    foreach ($modName in $AllModLines.Keys) {
+        $ml = $AllModLines[$modName]
+        $hlCount = 0
+        if ($ModHighlights[$modName]) { $hlCount = $ModHighlights[$modName].Count }
+        $cls = if ($hlCount -gt 0) { 'has-hl' } else { 'no-hl' }
+        if ($firstHlIdx -eq -1 -and $hlCount -gt 0) { $firstHlIdx = $modIdx }
+        $label = "$modName.$($ml.Ext)"
+        if ($hlCount -gt 0) { $label += " ($hlCount)" }
+        [void]$sidebarSb.Append("<div class=`"item $cls`" onclick=`"showTab($modIdx)`" id=`"tab$modIdx`">$(& $he $label)</div>")
+        $modIdx++
+    }
+    if ($firstHlIdx -eq -1) { $firstHlIdx = 0 }
+
+    # Build content
+    $contentSb = [System.Text.StringBuilder]::new()
+    $modIdx = 0
+    foreach ($modName in $AllModLines.Keys) {
+        $ml = $AllModLines[$modName]
+        $hlMap = $ModHighlights[$modName]
+        [void]$contentSb.Append("<div class=`"module`" id=`"mod$modIdx`"><table class=`"code-table`">")
+        for ($i = 0; $i -lt $ml.Lines.Count; $i++) {
+            $trClass = ''
+            $dataApi = ''
+            if ($hlMap -and $hlMap.ContainsKey($i)) {
+                $hl = $hlMap[$i]
+                $trClass = $hl.Color
+                $dataApi = $hl.PatternName
+            }
+            $ln = $i + 1
+            $dataAttr = if ($dataApi) { " data-api=`"$(& $he $dataApi)`"" } else { '' }
+            [void]$contentSb.Append("<tr class=`"$trClass`"$dataAttr><td class=`"ln`">$ln</td><td class=`"code`">$(& $he $ml.Lines[$i])</td></tr>")
+        }
+        [void]$contentSb.Append("</table></div>")
+        $modIdx++
+    }
+
+    # Build outline items
+    $outlineItems = [System.Collections.ArrayList]::new()
+    foreach ($modName in $AllModLines.Keys) {
+        $hlMap = $ModHighlights[$modName]
+        if (-not $hlMap) { continue }
+        $ext = $AllModLines[$modName].Ext
+        foreach ($lineIdx in ($hlMap.Keys | Sort-Object { [int]$_ })) {
+            $hl = $hlMap[$lineIdx]
+            $ln = [int]$lineIdx + 1
+            $label = "L$ln $($hl.PatternName)"
+            if ($label.Length -gt 50) { $label = $label.Substring(0, 47) + '...' }
+            [void]$outlineItems.Add(@{ ModName = "$modName.$ext"; LineNum = $ln; Label = $label; Color = $hl.Color })
+        }
+    }
+
+    # Build tooltip JS data from deduplicated entries
+    $tooltipJsSb = [System.Text.StringBuilder]::new()
+    [void]$tooltipJsSb.Append('{')
+    $first = $true
+    foreach ($key in $TooltipEntries.Keys) {
+        $info = $TooltipEntries[$key]
+        $altJs = ($info.Alt -replace '\\','\\\\' -replace "'","\'")
+        $noteJs = ($info.Note -replace '\\','\\\\' -replace "'","\'")
+        $exJs = ((& $he $info.Example) -replace '\\','\\\\' -replace "'","\'" -replace "`r`n",'\n' -replace "`n",'\n')
+        $comma = if ($first) { '' } else { ',' }
+        $first = $false
+        [void]$tooltipJsSb.Append("$comma'$(& $he $key)':{alt:'$altJs',note:'$noteJs',ex:'$exJs'}")
+    }
+    [void]$tooltipJsSb.Append('}')
+
+    # CSS
+    $analyzeCss = @"
+.sidebar .item.has-hl { color: #e8ab53; }
+.sidebar .item.no-hl { color: #606060; }
+.code-table { width: 100%; border-collapse: collapse; }
+.code-table td { padding: 0 8px; line-height: 20px; vertical-align: top; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.code-table .ln { width: 50px; min-width: 50px; text-align: right; color: #606060; padding-right: 12px; user-select: none; border-right: 1px solid #3c3c3c; }
+.code-table .code { color: #d4d4d4; }
+tr.hl-sanitized td.code { background: #4b3a00; color: #f0d080; }
+tr.hl-sanitized td.ln { color: #cccccc; }
+tr.hl-edr td.code { background: #1b2e4a; color: #a0c4f0; cursor: pointer; }
+tr.hl-edr td.ln { color: #cccccc; }
+tr.hl-compat td.code { background: #3a1b4a; color: #c4a0f0; cursor: pointer; }
+tr.hl-compat td.ln { color: #cccccc; }
+tr.hl-env td.code { background: #1b3a2a; color: #a0f0c4; cursor: pointer; }
+tr.hl-env td.ln { color: #cccccc; }
+tr.hl-biz td.code { background: #4a3a1b; color: #f0c4a0; cursor: pointer; }
+tr.hl-biz td.ln { color: #cccccc; }
+.minimap { right: 250px; }
+.minimap .mark.m-hl-sanitized { background: #e8ab53; }
+.minimap .mark.m-hl-edr { background: #4fc1ff; }
+.minimap .mark.m-hl-compat { background: #9a5eff; }
+.minimap .mark.m-hl-env { background: #50d090; }
+.minimap .mark.m-hl-biz { background: #d0a050; }
+.outline { width: 250px; min-width: 250px; background: #252526; border-left: 1px solid #3c3c3c; overflow-y: auto; padding: 8px 0; }
+.outline .ol-header { padding: 6px 12px; font-size: 11px; color: #888; text-transform: uppercase; }
+.outline .ol-item { padding: 3px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.outline .ol-item:hover { background: #2a2d2e; }
+.outline .ol-item.c-sanitized { color: #e8ab53; }
+.outline .ol-item.c-edr { color: #4fc1ff; }
+.outline .ol-item.c-compat { color: #9a5eff; }
+.outline .ol-item.c-env { color: #50d090; }
+.outline .ol-item.c-biz { color: #d0a050; }
+.hover-hint { position: fixed; background: #444; color: #ccc; padding: 2px 8px; border-radius: 3px; font-size: 11px; pointer-events: none; z-index: 50; display: none; }
+.tooltip { position: fixed; background: #2d2d2d; border: 1px solid #555; border-radius: 4px; padding: 10px 14px; max-width: 500px; z-index: 100; display: none; font-size: 12px; line-height: 1.5; box-shadow: 0 4px 12px rgba(0,0,0,0.5); user-select: text; }
+.tooltip .tt-api { color: #4fc1ff; font-weight: bold; font-size: 14px; }
+.tooltip .tt-alt { color: #6a9955; margin-top: 4px; }
+.tooltip .tt-note { color: #b0b0b0; font-style: italic; margin-top: 4px; }
+.tooltip pre { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; padding: 8px; margin-top: 6px; font-size: 11px; line-height: 1.4; max-height: 200px; overflow-y: auto; position: relative; }
+.tooltip .tt-copy { position: absolute; top: 6px; right: 6px; background: none; border: none; cursor: pointer; opacity: 0.5; padding: 2px; }
+.tooltip .tt-copy:hover { opacity: 1; }
+.tooltip .tt-copy svg { width: 14px; height: 14px; fill: #ccc; }
+"@
+
+    # Extra HTML
+    $extraHtml = @"
+<div class="outline" id="outline"></div>
+<div class="tooltip" id="tooltip"></div>
+<div class="hover-hint" id="hoverHint">Click for details</div>
+"@
+
+    # Build outline data as JS array
+    $olJsSb = [System.Text.StringBuilder]::new()
+    [void]$olJsSb.Append('[')
+    $olFirst = $true
+    foreach ($item in $outlineItems) {
+        $comma = if ($olFirst) { '' } else { ',' }
+        $olFirst = $false
+        $colorCls = switch ($item.Color) {
+            'hl-sanitized' { 'c-sanitized' }
+            'hl-edr' { 'c-edr' }
+            'hl-compat' { 'c-compat' }
+            'hl-env' { 'c-env' }
+            'hl-biz' { 'c-biz' }
+            default { '' }
+        }
+        $modLabel = & $he $item.ModName
+        $olLabel = & $he $item.Label
+        [void]$olJsSb.Append("${comma}{mod:'$modLabel',ln:$($item.LineNum),label:'$olLabel',cls:'$colorCls'}")
+    }
+    [void]$olJsSb.Append(']')
+
+    # JS
+    $analyzeJs = @"
+const outline = document.getElementById('outline');
+const tooltip = document.getElementById('tooltip');
+const hoverHint = document.getElementById('hoverHint');
+const apiInfo = $($tooltipJsSb.ToString());
+const outlineData = $($olJsSb.ToString());
+
+var _baseShowTab = showTab;
+showTab = function(idx) {
+  _baseShowTab(idx);
+  updateOutline();
+};
+
+function scrollToRow(r) {
+  const rRect = r.getBoundingClientRect();
+  const cRect = content.getBoundingClientRect();
+  const offset = rRect.top - cRect.top + content.scrollTop;
+  content.scrollTo({ top: offset - content.clientHeight / 3, behavior: 'smooth' });
+}
+
+function updateOutline() {
+  outline.innerHTML = '';
+  const hdr = document.createElement('div');
+  hdr.className = 'ol-header'; hdr.textContent = 'Detected Lines';
+  outline.appendChild(hdr);
+  const mod = document.querySelector('.module.active');
+  if (!mod) return;
+  const modIdx = parseInt(mod.id.replace('mod', ''));
+  const tabEl = document.getElementById('tab' + modIdx);
+  const modName = tabEl ? tabEl.textContent.replace(/ \(\d+\)$/, '') : '';
+  const rows = mod.querySelectorAll('tr');
+  rows.forEach(r => {
+    const cls = r.className;
+    if (!cls || (!cls.includes('hl-sanitized') && !cls.includes('hl-edr') && !cls.includes('hl-compat') && !cls.includes('hl-env') && !cls.includes('hl-biz'))) return;
+    const ln = r.querySelector('.ln');
+    if (!ln) return;
+    const lineNum = ln.textContent;
+    const api = r.dataset.api || '';
+    const label = 'L' + lineNum + ' ' + api;
+    const colorCls = cls.includes('hl-sanitized') ? 'c-sanitized' : cls.includes('hl-edr') ? 'c-edr' : cls.includes('hl-compat') ? 'c-compat' : cls.includes('hl-env') ? 'c-env' : 'c-biz';
+    const item = document.createElement('div');
+    item.className = 'ol-item ' + colorCls;
+    item.textContent = label.substring(0, 50);
+    item.addEventListener('click', () => scrollToRow(r));
+    outline.appendChild(item);
+  });
+}
+
+let pinnedTooltip = null;
+function showTooltipAt(tr) {
+  const api = tr.dataset.api;
+  if (!api) return;
+  const info = apiInfo[api];
+  if (!info) return;
+  let html = '<div class="tt-api">' + api + '</div>';
+  html += '<div class="tt-alt">Alternative: ' + info.alt + '</div>';
+  if (info.note) html += '<div class="tt-note">' + info.note + '</div>';
+  if (info.ex) html += '<pre><button class="tt-copy" onclick="copyPre(this)" title="Copy"><svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>' + info.ex.replace(/\\n/g, '\n') + '</pre>';
+  tooltip.innerHTML = html;
+  tooltip.style.display = 'block';
+  const rect = tr.getBoundingClientRect();
+  let top = rect.bottom + 4;
+  let left = rect.left + 60;
+  if (top + tooltip.offsetHeight > window.innerHeight) top = rect.top - tooltip.offsetHeight - 4;
+  if (left + tooltip.offsetWidth > window.innerWidth - 270) left = window.innerWidth - 270 - tooltip.offsetWidth - 10;
+  tooltip.style.top = top + 'px';
+  tooltip.style.left = left + 'px';
+  pinnedTooltip = tr;
+}
+function copyPre(btn) {
+  const pre = btn.closest('pre');
+  const text = pre.textContent.trim();
+  navigator.clipboard.writeText(text).then(() => {
+    btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="#6a9955"/></svg>';
+    setTimeout(() => { btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>'; }, 1500);
+  });
+}
+
+content.addEventListener('mousemove', (e) => {
+  const tr = e.target.closest('tr.hl-edr, tr.hl-compat, tr.hl-env, tr.hl-biz');
+  if (tr && tr.dataset.api && !pinnedTooltip) {
+    hoverHint.style.display = 'block';
+    hoverHint.style.left = (e.clientX + 12) + 'px';
+    hoverHint.style.top = (e.clientY - 8) + 'px';
+  } else {
+    hoverHint.style.display = 'none';
+  }
+});
+content.addEventListener('mouseleave', () => { hoverHint.style.display = 'none'; });
+content.addEventListener('click', (e) => {
+  hoverHint.style.display = 'none';
+  const tr = e.target.closest('tr.hl-edr, tr.hl-compat, tr.hl-env, tr.hl-biz');
+  if (!tr) { tooltip.style.display = 'none'; pinnedTooltip = null; return; }
+  if (pinnedTooltip === tr) {
+    tooltip.style.display = 'none'; pinnedTooltip = null;
+  } else {
+    showTooltipAt(tr);
+  }
+});
+"@
+
+    $htmlSubtitle = "$FileName -- $($CsvRow.EdrIssues) EDR, $($CsvRow.CompatIssues) compat, $($CsvRow.EnvIssues) env, $($CsvRow.BizIssues) biz, $TotalSanitized sanitized"
+    $htmlPath = Join-Path $OutDir "${OutPrefix}_analyze.html"
+
+    New-HtmlBase -Title "VBA Analysis: $FileName" -Subtitle $htmlSubtitle `
+        -ExtraCss $analyzeCss -SidebarHtml $sidebarSb.ToString() -ContentHtml $contentSb.ToString() `
+        -ExtraHtml $extraHtml -ExtraJs $analyzeJs `
+        -HighlightSelector 'tr.hl-sanitized, tr.hl-edr, tr.hl-compat, tr.hl-env, tr.hl-biz' `
+        -FirstTabIndex $firstHlIdx -OutputPath $htmlPath
+
+    return $htmlPath
+}
+
+# ============================================================================
 # Mode 1: No args -> Settings GUI
 # ============================================================================
 
@@ -477,8 +1093,10 @@ foreach ($f in $files) {
 
 $replacements = Get-VbaApiReplacements
 $csvRows = [System.Collections.ArrayList]::new()
-$he = { param($s) [System.Net.WebUtility]::HtmlEncode($s) }
 $processed = 0
+
+# CSV column definition for header generation and row serialization
+$csvColumnNames = @('Timestamp','RelativePath','FileName','Bas','Cls','Frm','TotalModules','CodeLines','EdrIssues','CompatIssues','SanitizedLines','References','Error','EnvIssues','BizIssues','InfoCount','RiskLevel','MigrationClass','PrimaryConcern','NeedsReviewBy','TopApiNames','TopComProgIds','SampleEvidence')
 
 foreach ($filePath in $files) {
     $processed++
@@ -510,18 +1128,6 @@ foreach ($filePath in $files) {
 
     Write-VbaHeader 'Analyze' $fileName
 
-    $csvRow = [ordered]@{
-        Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        RelativePath = [IO.Path]::GetDirectoryName($relPath)
-        FileName = $fileName
-        Bas = 0; Cls = 0; Frm = 0; TotalModules = 0; CodeLines = 0
-        EdrIssues = 0; CompatIssues = 0; SanitizedLines = 0
-        References = ''; Error = ''
-        EnvIssues = 0; BizIssues = 0; InfoCount = 0
-        RiskLevel = 'Low'; MigrationClass = ''; PrimaryConcern = 'Other'
-        NeedsReviewBy = ''; TopApiNames = ''; TopComProgIds = ''; SampleEvidence = ''
-    }
-
     try {
         # Load project
         $project = if ($anySanitize) {
@@ -530,164 +1136,29 @@ foreach ($filePath in $files) {
             Get-AllModuleCode $filePath -StripAttributes
         }
         if (-not $project) {
-            $csvRow.Error = 'No VBA project'
-            [void]$csvRows.Add($csvRow)
+            $errorRow = [ordered]@{}
+            foreach ($col in $csvColumnNames) { $errorRow[$col] = '' }
+            $errorRow.Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $errorRow.RelativePath = [IO.Path]::GetDirectoryName($relPath)
+            $errorRow.FileName = $fileName
+            $errorRow.Error = 'No VBA project'
+            [void]$csvRows.Add($errorRow)
             Write-VbaError 'Analyze' $fileName 'No vbaProject.bin found'
             continue
         }
 
-        # Module counts
-        foreach ($modName in $project.Modules.Keys) {
-            $mod = $project.Modules[$modName]
-            $csvRow.TotalModules++
-            switch ($mod.Ext) { 'bas' { $csvRow.Bas++ } 'cls' { $csvRow.Cls++ } 'frm' { $csvRow.Frm++ } }
-            $csvRow.CodeLines += $mod.Lines.Count
-        }
-
-        Write-VbaStatus 'Analyze' $fileName "Modules: $($csvRow.TotalModules) ($($csvRow.Bas) bas, $($csvRow.Cls) cls, $($csvRow.Frm) frm)"
-
         # Analysis
         $analysis = Get-VbaAnalysis -Project $project
-        $csvRow.EdrIssues = $analysis.IssueCount
-        $csvRow.CompatIssues = $analysis.CompatIssueCount
-        $csvRow.EnvIssues = $analysis.EnvIssueCount
-        $csvRow.BizIssues = $analysis.BizIssueCount
-        $csvRow.InfoCount = $analysis.InfoCount
-        $csvRow.References = $analysis.ExternalRefs -join '; '
 
-        Write-VbaStatus 'Analyze' $fileName "EDR issues: $($csvRow.EdrIssues)"
-        Write-VbaStatus 'Analyze' $fileName "Compat issues: $($csvRow.CompatIssues)"
-        Write-VbaStatus 'Analyze' $fileName "Env issues: $($csvRow.EnvIssues)"
-        Write-VbaStatus 'Analyze' $fileName "Biz issues: $($csvRow.BizIssues)"
-
-        # === Compute judgment columns ===
-        # Gather all code as one string for pattern checks
-        $allCodeStr = ($analysis.AllCode.Values | ForEach-Object { $_ -join "`n" }) -join "`n"
-
-        # GUI operation APIs
-        $guiApiNames = @('FindWindow','SendMessage','PostMessage','keybd_event','mouse_event')
-        $hasGuiApi = $false
-        $hasPsWScript = $false
-        $hasWin32NonGui = $false
-        $hasDao = $false
-        foreach ($decl in $analysis.ApiDecls) {
-            if ($guiApiNames -contains $decl.Name) { $hasGuiApi = $true }
-            else { $hasWin32NonGui = $true }
-        }
-        if ($analysis.Findings.Contains('PowerShell / WScript')) { $hasPsWScript = $true }
-        if ($analysis.CompatFindings.Contains('Deprecated: DAO')) { $hasDao = $true }
-
-        # RiskLevel
-        if ($hasGuiApi -or $hasPsWScript) { $csvRow.RiskLevel = 'High' }
-        elseif ($hasWin32NonGui -or $hasDao) { $csvRow.RiskLevel = 'Medium' }
-        else { $csvRow.RiskLevel = 'Low' }
-
-        # Check for path-related env issues (used by both MigrationClass and PrimaryConcern)
-        $pathPatterns = @('Fixed drive letter','UNC path','User folder','Desktop / Documents','AppData','Program Files','External workbook open (literal)')
-        $hasPathIssue = $false
-        foreach ($pp in $pathPatterns) {
-            if ($analysis.EnvFindings.Contains($pp)) { $hasPathIssue = $true; break }
-        }
-
-        # MigrationClass
-        $migClasses = [System.Collections.ArrayList]::new()
-        $totalAllIssues = $csvRow.EdrIssues + $csvRow.CompatIssues + $csvRow.EnvIssues + $csvRow.BizIssues
-        if ($totalAllIssues -eq 0) {
-            [void]$migClasses.Add('NoChange')
-        } else {
-            # Check for Rebuild
-            if ($hasGuiApi -or $hasPsWScript -or $analysis.Findings.Contains('Shell / process')) {
-                [void]$migClasses.Add('Rebuild')
-            }
-            # Check for NeedsReplacement
-            if ($hasWin32NonGui -or $hasDao) {
-                [void]$migClasses.Add('NeedsReplacement')
-            }
-            # Check for MinorFix (compat-only issues)
-            $hasCompatOnly = ($csvRow.CompatIssues -gt 0) -and -not $hasWin32NonGui -and -not $hasDao -and -not $hasGuiApi -and -not $hasPsWScript -and ($csvRow.EdrIssues -eq 0)
-            if ($hasCompatOnly -and $csvRow.EnvIssues -eq 0 -and $csvRow.BizIssues -eq 0) {
-                [void]$migClasses.Add('MinorFix')
-            } elseif ($csvRow.CompatIssues -gt 0 -and $migClasses.Count -eq 0) {
-                [void]$migClasses.Add('MinorFix')
-            }
-            # Check for StorageReview (env path-related)
-            if ($hasPathIssue) {
-                [void]$migClasses.Add('StorageReview')
-            }
-            if ($migClasses.Count -eq 0) {
-                [void]$migClasses.Add('MinorFix')
-            }
-        }
-        $csvRow.MigrationClass = $migClasses -join '; '
-
-        # PrimaryConcern (weighted priority)
-        $csvRow.PrimaryConcern = 'Other'
-        if ($hasGuiApi) { $csvRow.PrimaryConcern = 'GUI' }
-        elseif ($hasPsWScript -or $analysis.Findings.Contains('Shell / process')) { $csvRow.PrimaryConcern = 'Process' }
-        elseif ($hasPathIssue) { $csvRow.PrimaryConcern = 'StorageMigration' }
-        elseif ($hasDao -or $analysis.BizFindings.Contains('Access / DB integration') -or $analysis.EnvFindings.Contains('Connection string')) { $csvRow.PrimaryConcern = 'DB' }
-        elseif ($analysis.BizFindings.Contains('Outlook integration') -or $analysis.BizFindings.Contains('Word integration') -or $analysis.BizFindings.Contains('External EXE')) { $csvRow.PrimaryConcern = 'COM' }
-        elseif ($analysis.Findings.Contains('Network / HTTP') -or $analysis.EnvFindings.Contains('Fixed IP address') -or $analysis.EnvFindings.Contains('localhost') -or $analysis.EnvFindings.Contains('Fixed connection host')) { $csvRow.PrimaryConcern = 'Network' }
-        elseif ($analysis.BizFindings.Contains('Outlook integration')) { $csvRow.PrimaryConcern = 'Mail' }
-        elseif ($analysis.Findings.Contains('File I/O') -or $analysis.Findings.Contains('FileSystemObject')) { $csvRow.PrimaryConcern = 'File' }
-        elseif ($totalAllIssues -gt 0) { $csvRow.PrimaryConcern = 'Other' }
-
-        # NeedsReviewBy
-        $reviewers = [System.Collections.ArrayList]::new()
-        if ($csvRow.EdrIssues -gt 0) { [void]$reviewers.Add('Security') }
-        if ($csvRow.EnvIssues -gt 0 -or $analysis.EnvFindings.Contains('Fixed printer name')) { [void]$reviewers.Add('Infra') }
-        if ($hasDao -or $analysis.BizFindings.Contains('Access / DB integration') -or $analysis.EnvFindings.Contains('Connection string')) { [void]$reviewers.Add('DB') }
-        if ($analysis.BizFindings.Contains('Outlook integration') -or $analysis.BizFindings.Contains('Word integration') -or $analysis.BizFindings.Contains('External EXE')) { [void]$reviewers.Add('BusinessOwner') }
-        if ($analysis.BizFindings.Contains('Print') -or $analysis.BizFindings.Contains('PDF export') -or $analysis.EnvFindings.Contains('Fixed printer name')) { [void]$reviewers.Add('ClientPC') }
-        if ($csvRow.CompatIssues -gt 0 -and $reviewers.Count -eq 0) { [void]$reviewers.Add('Developer') }
-        elseif ($csvRow.CompatIssues -gt 0) { [void]$reviewers.Add('Developer') }
-        $csvRow.NeedsReviewBy = $reviewers -join '; '
-
-        # TopApiNames (GUI APIs first, then others, top 3)
-        $topApis = [System.Collections.ArrayList]::new()
-        foreach ($d in $analysis.ApiDecls) {
-            if ($guiApiNames -contains $d.Name -and $topApis -notcontains $d.Name) { [void]$topApis.Add($d.Name) }
-        }
-        foreach ($d in $analysis.ApiDecls) {
-            if ($guiApiNames -notcontains $d.Name -and $topApis -notcontains $d.Name) { [void]$topApis.Add($d.Name) }
-        }
-        $csvRow.TopApiNames = ($topApis | Select-Object -First 3) -join '; '
-
-        # TopComProgIds (first 3 unique COM ProgIDs)
-        $topCom = [System.Collections.ArrayList]::new()
-        foreach ($b in $analysis.ComBindings) {
-            if ($topCom -notcontains $b.ProgId) { [void]$topCom.Add($b.ProgId) }
-        }
-        $csvRow.TopComProgIds = ($topCom | Select-Object -First 3) -join '; '
-
-        # SampleEvidence (heaviest finding, one representative line)
-        $sampleEvidence = ''
-        # Priority: GUI API > Shell/PS > Env path > DB > COM > Network > Mail > File > Other
-        $evidenceSources = @(
-            @{ Key = 'Win32 API (Declare)'; Coll = $analysis.Findings }
-            @{ Key = 'Shell / process'; Coll = $analysis.Findings }
-            @{ Key = 'PowerShell / WScript'; Coll = $analysis.Findings }
-            @{ Key = 'Fixed drive letter'; Coll = $analysis.EnvFindings }
-            @{ Key = 'UNC path'; Coll = $analysis.EnvFindings }
-            @{ Key = 'Connection string'; Coll = $analysis.EnvFindings }
-            @{ Key = 'Access / DB integration'; Coll = $analysis.BizFindings }
-            @{ Key = 'Outlook integration'; Coll = $analysis.BizFindings }
-            @{ Key = 'Network / HTTP'; Coll = $analysis.Findings }
-            @{ Key = 'File I/O'; Coll = $analysis.Findings }
-        )
-        foreach ($src in $evidenceSources) {
-            if ($src.Coll.Contains($src.Key) -and $src.Coll[$src.Key].Findings.Count -gt 0) {
-                $raw = $src.Coll[$src.Key].Findings[0]
-                if ($raw.Length -gt 100) { $raw = $raw.Substring(0, 97) + '...' }
-                $sampleEvidence = $raw
-                break
-            }
-        }
-        $csvRow.SampleEvidence = $sampleEvidence
+        Write-VbaStatus 'Analyze' $fileName "Modules: $($project.Modules.Count)"
+        Write-VbaStatus 'Analyze' $fileName "EDR issues: $($analysis.IssueCount)"
+        Write-VbaStatus 'Analyze' $fileName "Compat issues: $($analysis.CompatIssueCount)"
+        Write-VbaStatus 'Analyze' $fileName "Env issues: $($analysis.EnvIssueCount)"
+        Write-VbaStatus 'Analyze' $fileName "Biz issues: $($analysis.BizIssueCount)"
 
         # === Sanitize pass ===
         $totalSanitized = 0
-        $sanitizedLineMap = @{}  # "modName:lineIdx" -> rule name
+        $sanitizedLineMap = @{}
 
         # Collect declared API names for call-site sanitizing
         $declaredNames = [System.Collections.ArrayList]::new()
@@ -711,49 +1182,9 @@ foreach ($filePath in $files) {
             $encoding = [System.Text.Encoding]::GetEncoding($project.Codepage)
             $ole2Bytes = $project.Ole2Bytes
 
-            foreach ($modName in $project.Modules.Keys) {
-                $md = $project.Modules[$modName]
-                if (-not $md.Entry) { continue }
-                $lines = $md.Code -split "`r`n|`n"
-                $changes = 0
-
-                for ($i = 0; $i -lt $lines.Length; $i++) {
-                    if ($lines[$i] -match '^\s*''') { continue }
-                    $matched = $false; $ruleName = ''; $prefix = "' [EDR] "
-                    foreach ($rule in $sanitizeRules) {
-                        if ($lines[$i] -match $rule.Pattern) { $matched = $true; $ruleName = $rule.Name; $prefix = $rule.Prefix; break }
-                    }
-                    if (-not $matched -and $declaredNames.Count -gt 0) {
-                        foreach ($apiName in $declaredNames) {
-                            if ($lines[$i] -match "\b$([regex]::Escape($apiName))\b") { $matched = $true; $ruleName = "Call to $apiName"; $prefix = "' [EDR] "; break }
-                        }
-                    }
-                    if ($matched) {
-                        $lines[$i] = $prefix + $lines[$i].TrimStart()
-                        $changes++
-                        $sanitizedLineMap["${modName}:$i"] = $ruleName
-                    }
-                }
-
-                if ($changes -eq 0) { continue }
-                $totalSanitized += $changes
-
-                $newCode = $lines -join "`r`n"
-                $newCodeBytes = $encoding.GetBytes($newCode)
-                $newCompressed = Compress-VBA $newCodeBytes
-
-                $prefixBytes = New-Object byte[] $md.Offset
-                [Array]::Copy($md.StreamData, $prefixBytes, $md.Offset)
-                $newStream = New-Object byte[] ($prefixBytes.Length + $newCompressed.Length)
-                [Array]::Copy($prefixBytes, $newStream, $prefixBytes.Length)
-                [Array]::Copy($newCompressed, 0, $newStream, $prefixBytes.Length, $newCompressed.Length)
-
-                Write-Ole2Stream $ole2Bytes $project.Ole2 $md.Entry $newStream
-
-                # Update module lines in project for HTML/report generation
-                $md.Lines = $lines
-                $md.Code = $newCode
-            }
+            $sanitizeResult = Invoke-SanitizePass -Project $project -SanitizeRules $sanitizeRules -DeclaredNames $declaredNames -Encoding $encoding -Ole2Bytes $ole2Bytes
+            $totalSanitized = $sanitizeResult.TotalSanitized
+            $sanitizedLineMap = $sanitizeResult.SanitizedLineMap
 
             if ($totalSanitized -gt 0) {
                 Save-VbaProjectBytes $copyPath $ole2Bytes $project.IsZip
@@ -762,21 +1193,21 @@ foreach ($filePath in $files) {
             }
         }
 
-        $csvRow.SanitizedLines = $totalSanitized
         Write-VbaStatus 'Analyze' $fileName "Sanitized: $totalSanitized lines"
 
+        # === Build CSV row using column-definition approach ===
+        $csvRow = Build-AnalyzeCsvRow -Analysis $analysis -Project $project -FileName $fileName -RelPath $relPath -TotalSanitized $totalSanitized -Replacements $replacements
+
         # === Build line-level highlight data for HTML ===
-        # Re-read modules (use sanitized lines if available)
         $allModLines = [ordered]@{}
         foreach ($modName in $project.Modules.Keys) {
             $mod = $project.Modules[$modName]
             $lines = if ($mod.Lines -is [array]) { $mod.Lines } else { @($mod.Lines) }
-            # Strip attributes for display
             $displayLines = @($lines | Where-Object { $_ -notmatch '^\s*Attribute\s+VB_' })
             $allModLines[$modName] = @{ Ext = $mod.Ext; Lines = $displayLines }
         }
 
-        # Build highlight map per module: lineIdx -> @{ color, category, patternName }
+        # Build highlight map per module
         $modHighlights = @{}
         foreach ($modName in $allModLines.Keys) {
             $ml = $allModLines[$modName]
@@ -784,7 +1215,6 @@ foreach ($filePath in $files) {
             for ($i = 0; $i -lt $ml.Lines.Count; $i++) {
                 $line = $ml.Lines[$i]
 
-                # Sanitized lines (yellow, highest priority)
                 if ($line -match "^\s*'\s*\[EDR\]") {
                     $hlMap[$i] = @{ Color = 'hl-sanitized'; Category = 'edr'; PatternName = 'Sanitized (EDR)' }
                     continue
@@ -796,8 +1226,6 @@ foreach ($filePath in $files) {
 
                 if ($line -match '^\s*''') { continue }
 
-                # Detect EDR (blue) > compat (purple) > env (green) > biz (orange)
-                # Collect all matching rules for this line, pick highest priority
                 $foundEdr = $null; $foundCompat = $null; $foundEnv = $null; $foundBiz = $null
                 foreach ($rule in $detectRules) {
                     if ($line -match $rule.Pattern) {
@@ -818,7 +1246,6 @@ foreach ($filePath in $files) {
                     continue
                 }
 
-                # Check API call sites (before env/biz, as API calls are EDR-level)
                 $apiMatched = $false
                 foreach ($apiName in $analysis.ApiCallNames) {
                     if ($line -match "\b$([regex]::Escape($apiName))\b") {
@@ -842,383 +1269,42 @@ foreach ($filePath in $files) {
         }
 
         # === Generate analyze.txt ===
-        $txtSb = [System.Text.StringBuilder]::new()
-        [void]$txtSb.AppendLine("# VBA Analysis Report")
-        [void]$txtSb.AppendLine("# Source: $fileName")
-        [void]$txtSb.AppendLine("# Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-        [void]$txtSb.AppendLine("")
-        [void]$txtSb.AppendLine("## Modules ($($csvRow.TotalModules))")
-        foreach ($modName in $allModLines.Keys) {
-            $ml = $allModLines[$modName]
-            [void]$txtSb.AppendLine("  $modName.$($ml.Ext) ($($ml.Lines.Count) lines)")
-        }
-        [void]$txtSb.AppendLine("  Total: $($csvRow.CodeLines) lines")
-        [void]$txtSb.AppendLine("")
+        $reportText = Build-AnalyzeTextReport -Analysis $analysis -AllModLines $allModLines -CsvRow $csvRow -FileName $fileName -TotalSanitized $totalSanitized -Replacements $replacements
+        [IO.File]::WriteAllText((Join-Path $outDir "${outPrefix}_analyze.txt"), $reportText, [System.Text.Encoding]::UTF8)
 
-        if ($analysis.Findings.Count -gt 0) {
-            [void]$txtSb.AppendLine("## EDR Risks ($($analysis.IssueCount))")
-            foreach ($cat in $analysis.Findings.Keys) {
-                $f = $analysis.Findings[$cat]
-                [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
-                if ($f.Aggregate) {
-                    [void]$txtSb.AppendLine("    (aggregated: $($f.Findings.Count) occurrences)")
-                } else {
-                    foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
-                }
-            }
-            [void]$txtSb.AppendLine("")
-        }
-
-        if ($analysis.CompatFindings.Count -gt 0) {
-            [void]$txtSb.AppendLine("## Compatibility Risks ($($analysis.CompatIssueCount))")
-            foreach ($cat in $analysis.CompatFindings.Keys) {
-                $f = $analysis.CompatFindings[$cat]
-                [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
-                foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
-            }
-            [void]$txtSb.AppendLine("")
-        }
-
-        if ($analysis.EnvFindings.Count -gt 0) {
-            [void]$txtSb.AppendLine("## Environment Risks ($($analysis.EnvIssueCount))")
-            foreach ($cat in $analysis.EnvFindings.Keys) {
-                $f = $analysis.EnvFindings[$cat]
-                [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
-                foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
-            }
-            [void]$txtSb.AppendLine("")
-        }
-
-        if ($analysis.BizFindings.Count -gt 0) {
-            [void]$txtSb.AppendLine("## Business Risks ($($analysis.BizIssueCount))")
-            foreach ($cat in $analysis.BizFindings.Keys) {
-                $f = $analysis.BizFindings[$cat]
-                [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
-                foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
-            }
-            [void]$txtSb.AppendLine("")
-        }
-
-        if ($analysis.InfoFindings.Count -gt 0) {
-            [void]$txtSb.AppendLine("## Info (Reference) ($($analysis.InfoCount))")
-            foreach ($cat in $analysis.InfoFindings.Keys) {
-                $f = $analysis.InfoFindings[$cat]
-                [void]$txtSb.AppendLine("  $cat ($($f.Findings.Count))")
-                foreach ($finding in $f.Findings) { [void]$txtSb.AppendLine("    $finding") }
-            }
-            [void]$txtSb.AppendLine("")
-        }
-
-        if ($analysis.ComBindings.Count -gt 0) {
-            [void]$txtSb.AppendLine("## COM Object Usage Details")
-            $comByProg = @{}
-            foreach ($b in $analysis.ComBindings) {
-                if (-not $comByProg.ContainsKey($b.ProgId)) { $comByProg[$b.ProgId] = [System.Collections.ArrayList]::new() }
-                [void]$comByProg[$b.ProgId].Add($b)
-            }
-            foreach ($prog in $comByProg.Keys) {
-                [void]$txtSb.AppendLine("  $prog")
-                foreach ($b in $comByProg[$prog]) {
-                    [void]$txtSb.AppendLine("    $($b.File) L$($b.Line): Set $($b.VarName) = ...")
-                }
-            }
-            [void]$txtSb.AppendLine("")
-        }
-
-        if ($analysis.ApiDecls.Count -gt 0) {
-            [void]$txtSb.AppendLine("## Win32 API Usage Details")
-            foreach ($decl in $analysis.ApiDecls) {
-                [void]$txtSb.AppendLine("  $($decl.Name)")
-                [void]$txtSb.AppendLine("    $($decl.File) L$($decl.Line): $($decl.Sig)")
-                $info = $replacements[$decl.Name]
-                if ($info) { [void]$txtSb.AppendLine("    Alternative: $($info.Alt)") }
-            }
-            [void]$txtSb.AppendLine("")
-        }
-
-        if ($analysis.ExternalRefs.Count -gt 0) {
-            [void]$txtSb.AppendLine("## External References ($($analysis.ExternalRefs.Count))")
-            foreach ($ref in $analysis.ExternalRefs) { [void]$txtSb.AppendLine("  $ref") }
-            [void]$txtSb.AppendLine("")
-        }
-
-        [void]$txtSb.AppendLine("## Summary")
-        [void]$txtSb.AppendLine("  $($csvRow.EdrIssues) EDR, $($csvRow.CompatIssues) compat, $($csvRow.EnvIssues) env, $($csvRow.BizIssues) biz, $($csvRow.InfoCount) info, $totalSanitized sanitized")
-        [void]$txtSb.AppendLine("  RiskLevel: $($csvRow.RiskLevel) | MigrationClass: $($csvRow.MigrationClass)")
-        [void]$txtSb.AppendLine("  PrimaryConcern: $($csvRow.PrimaryConcern) | NeedsReviewBy: $($csvRow.NeedsReviewBy)")
-
-        [IO.File]::WriteAllText((Join-Path $outDir "${outPrefix}_analyze.txt"), $txtSb.ToString(), [System.Text.Encoding]::UTF8)
-
-        # === Generate analyze.html ===
-        # Build sidebar
-        $sidebarSb = [System.Text.StringBuilder]::new()
-        $modIdx = 0; $firstHlIdx = -1
-        foreach ($modName in $allModLines.Keys) {
-            $ml = $allModLines[$modName]
-            $hlCount = 0
-            if ($modHighlights[$modName]) { $hlCount = $modHighlights[$modName].Count }
-            $cls = if ($hlCount -gt 0) { 'has-hl' } else { 'no-hl' }
-            if ($firstHlIdx -eq -1 -and $hlCount -gt 0) { $firstHlIdx = $modIdx }
-            $label = "$modName.$($ml.Ext)"
-            if ($hlCount -gt 0) { $label += " ($hlCount)" }
-            [void]$sidebarSb.Append("<div class=`"item $cls`" onclick=`"showTab($modIdx)`" id=`"tab$modIdx`">$(& $he $label)</div>")
-            $modIdx++
-        }
-        if ($firstHlIdx -eq -1) { $firstHlIdx = 0 }
-
-        # Build content
-        $contentSb = [System.Text.StringBuilder]::new()
-        $modIdx = 0
-        foreach ($modName in $allModLines.Keys) {
-            $ml = $allModLines[$modName]
-            $hlMap = $modHighlights[$modName]
-            [void]$contentSb.Append("<div class=`"module`" id=`"mod$modIdx`"><table class=`"code-table`">")
-            for ($i = 0; $i -lt $ml.Lines.Count; $i++) {
-                $trClass = ''
-                $dataApi = ''
-                if ($hlMap -and $hlMap.ContainsKey($i)) {
-                    $hl = $hlMap[$i]
-                    $trClass = $hl.Color
-                    $dataApi = $hl.PatternName
-                }
-                $ln = $i + 1
-                $dataAttr = if ($dataApi) { " data-api=`"$(& $he $dataApi)`"" } else { '' }
-                [void]$contentSb.Append("<tr class=`"$trClass`"$dataAttr><td class=`"ln`">$ln</td><td class=`"code`">$(& $he $ml.Lines[$i])</td></tr>")
-            }
-            [void]$contentSb.Append("</table></div>")
-            $modIdx++
-        }
-
-        # Build outline items (flat, sorted by module then line number)
-        $outlineItems = [System.Collections.ArrayList]::new()
-        foreach ($modName in $allModLines.Keys) {
-            $hlMap = $modHighlights[$modName]
-            if (-not $hlMap) { continue }
-            $ext = $allModLines[$modName].Ext
-            foreach ($lineIdx in ($hlMap.Keys | Sort-Object { [int]$_ })) {
-                $hl = $hlMap[$lineIdx]
-                $ln = [int]$lineIdx + 1
-                $label = "L$ln $($hl.PatternName)"
-                if ($label.Length -gt 50) { $label = $label.Substring(0, 47) + '...' }
-                [void]$outlineItems.Add(@{ ModName = "$modName.$ext"; LineNum = $ln; Label = $label; Color = $hl.Color })
-            }
-        }
-
-        # Build tooltip data for replacements
-        $tooltipEntries = [System.Text.StringBuilder]::new()
-        [void]$tooltipEntries.Append('{')
-        $first = $true
+        # === Build deduplicated tooltip entries ===
+        $tooltipEntries = [ordered]@{}
+        # API-level entries (from call names and declarations)
         foreach ($apiName in @($analysis.ApiCallNames) + @($analysis.ApiDecls | ForEach-Object { $_.Name })) {
             $info = $replacements[$apiName]
             if (-not $info) { continue }
             $key = "API: $apiName"
-            $altJs = ($info.Alt -replace '\\','\\\\' -replace "'","\'")
-            $noteJs = ($info.Note -replace '\\','\\\\' -replace "'","\'")
-            $exJs = ((& $he $info.Example) -replace '\\','\\\\' -replace "'","\'" -replace "`r`n",'\n' -replace "`n",'\n')
-            $comma = if ($first) { '' } else { ',' }
-            $first = $false
-            [void]$tooltipEntries.Append("$comma'$(& $he $key)':{alt:'$altJs',note:'$noteJs',ex:'$exJs'}")
+            if (-not $tooltipEntries.Contains($key)) {
+                $tooltipEntries[$key] = $info
+            }
         }
-        # Also add pattern-level replacements
+        # Pattern-level entries
         foreach ($patName in @($patternDefs.Patterns.Keys) + @($patternDefs.CompatPatterns.Keys) + @($patternDefs.EnvPatterns.Keys) + @($patternDefs.EnvInfoPatterns.Keys) + @($patternDefs.BizPatterns.Keys)) {
             $info = $replacements[$patName]
             if (-not $info) { continue }
-            $altJs = ($info.Alt -replace '\\','\\\\' -replace "'","\'")
-            $noteJs = ($info.Note -replace '\\','\\\\' -replace "'","\'")
-            $exJs = ((& $he $info.Example) -replace '\\','\\\\' -replace "'","\'" -replace "`r`n",'\n' -replace "`n",'\n')
-            $comma = if ($first) { '' } else { ',' }
-            $first = $false
-            [void]$tooltipEntries.Append("$comma'$(& $he $patName)':{alt:'$altJs',note:'$noteJs',ex:'$exJs'}")
-        }
-        [void]$tooltipEntries.Append('}')
-
-        # CSS
-        $analyzeCss = @"
-.sidebar .item.has-hl { color: #e8ab53; }
-.sidebar .item.no-hl { color: #606060; }
-.code-table { width: 100%; border-collapse: collapse; }
-.code-table td { padding: 0 8px; line-height: 20px; vertical-align: top; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
-.code-table .ln { width: 50px; min-width: 50px; text-align: right; color: #606060; padding-right: 12px; user-select: none; border-right: 1px solid #3c3c3c; }
-.code-table .code { color: #d4d4d4; }
-tr.hl-sanitized td.code { background: #4b3a00; color: #f0d080; }
-tr.hl-sanitized td.ln { color: #cccccc; }
-tr.hl-edr td.code { background: #1b2e4a; color: #a0c4f0; cursor: pointer; }
-tr.hl-edr td.ln { color: #cccccc; }
-tr.hl-compat td.code { background: #3a1b4a; color: #c4a0f0; cursor: pointer; }
-tr.hl-compat td.ln { color: #cccccc; }
-tr.hl-env td.code { background: #1b3a2a; color: #a0f0c4; cursor: pointer; }
-tr.hl-env td.ln { color: #cccccc; }
-tr.hl-biz td.code { background: #4a3a1b; color: #f0c4a0; cursor: pointer; }
-tr.hl-biz td.ln { color: #cccccc; }
-.minimap { right: 250px; }
-.minimap .mark.m-hl-sanitized { background: #e8ab53; }
-.minimap .mark.m-hl-edr { background: #4fc1ff; }
-.minimap .mark.m-hl-compat { background: #9a5eff; }
-.minimap .mark.m-hl-env { background: #50d090; }
-.minimap .mark.m-hl-biz { background: #d0a050; }
-.outline { width: 250px; min-width: 250px; background: #252526; border-left: 1px solid #3c3c3c; overflow-y: auto; padding: 8px 0; }
-.outline .ol-header { padding: 6px 12px; font-size: 11px; color: #888; text-transform: uppercase; }
-.outline .ol-item { padding: 3px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.outline .ol-item:hover { background: #2a2d2e; }
-.outline .ol-item.c-sanitized { color: #e8ab53; }
-.outline .ol-item.c-edr { color: #4fc1ff; }
-.outline .ol-item.c-compat { color: #9a5eff; }
-.outline .ol-item.c-env { color: #50d090; }
-.outline .ol-item.c-biz { color: #d0a050; }
-.hover-hint { position: fixed; background: #444; color: #ccc; padding: 2px 8px; border-radius: 3px; font-size: 11px; pointer-events: none; z-index: 50; display: none; }
-.tooltip { position: fixed; background: #2d2d2d; border: 1px solid #555; border-radius: 4px; padding: 10px 14px; max-width: 500px; z-index: 100; display: none; font-size: 12px; line-height: 1.5; box-shadow: 0 4px 12px rgba(0,0,0,0.5); user-select: text; }
-.tooltip .tt-api { color: #4fc1ff; font-weight: bold; font-size: 14px; }
-.tooltip .tt-alt { color: #6a9955; margin-top: 4px; }
-.tooltip .tt-note { color: #b0b0b0; font-style: italic; margin-top: 4px; }
-.tooltip pre { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; padding: 8px; margin-top: 6px; font-size: 11px; line-height: 1.4; max-height: 200px; overflow-y: auto; position: relative; }
-.tooltip .tt-copy { position: absolute; top: 6px; right: 6px; background: none; border: none; cursor: pointer; opacity: 0.5; padding: 2px; }
-.tooltip .tt-copy:hover { opacity: 1; }
-.tooltip .tt-copy svg { width: 14px; height: 14px; fill: #ccc; }
-"@
-
-        # Extra HTML
-        $extraHtml = @"
-<div class="outline" id="outline"></div>
-<div class="tooltip" id="tooltip"></div>
-<div class="hover-hint" id="hoverHint">Click for details</div>
-"@
-
-        # Build outline data as JS array
-        $olJsSb = [System.Text.StringBuilder]::new()
-        [void]$olJsSb.Append('[')
-        $olFirst = $true
-        foreach ($item in $outlineItems) {
-            $comma = if ($olFirst) { '' } else { ',' }
-            $olFirst = $false
-            $colorCls = switch ($item.Color) {
-                'hl-sanitized' { 'c-sanitized' }
-                'hl-edr' { 'c-edr' }
-                'hl-compat' { 'c-compat' }
-                'hl-env' { 'c-env' }
-                'hl-biz' { 'c-biz' }
-                default { '' }
+            if (-not $tooltipEntries.Contains($patName)) {
+                $tooltipEntries[$patName] = $info
             }
-            $modLabel = & $he $item.ModName
-            $olLabel = & $he $item.Label
-            [void]$olJsSb.Append("${comma}{mod:'$modLabel',ln:$($item.LineNum),label:'$olLabel',cls:'$colorCls'}")
         }
-        [void]$olJsSb.Append(']')
 
-        # JS
-        $analyzeJs = @"
-const outline = document.getElementById('outline');
-const tooltip = document.getElementById('tooltip');
-const hoverHint = document.getElementById('hoverHint');
-const apiInfo = $($tooltipEntries.ToString());
-const outlineData = $($olJsSb.ToString());
-
-var _baseShowTab = showTab;
-showTab = function(idx) {
-  _baseShowTab(idx);
-  updateOutline();
-};
-
-function scrollToRow(r) {
-  const rRect = r.getBoundingClientRect();
-  const cRect = content.getBoundingClientRect();
-  const offset = rRect.top - cRect.top + content.scrollTop;
-  content.scrollTo({ top: offset - content.clientHeight / 3, behavior: 'smooth' });
-}
-
-function updateOutline() {
-  outline.innerHTML = '';
-  const hdr = document.createElement('div');
-  hdr.className = 'ol-header'; hdr.textContent = 'Detected Lines';
-  outline.appendChild(hdr);
-  const mod = document.querySelector('.module.active');
-  if (!mod) return;
-  const modIdx = parseInt(mod.id.replace('mod', ''));
-  const tabEl = document.getElementById('tab' + modIdx);
-  const modName = tabEl ? tabEl.textContent.replace(/ \(\d+\)$/, '') : '';
-  const rows = mod.querySelectorAll('tr');
-  rows.forEach(r => {
-    const cls = r.className;
-    if (!cls || (!cls.includes('hl-sanitized') && !cls.includes('hl-edr') && !cls.includes('hl-compat') && !cls.includes('hl-env') && !cls.includes('hl-biz'))) return;
-    const ln = r.querySelector('.ln');
-    if (!ln) return;
-    const lineNum = ln.textContent;
-    const api = r.dataset.api || '';
-    const label = 'L' + lineNum + ' ' + api;
-    const colorCls = cls.includes('hl-sanitized') ? 'c-sanitized' : cls.includes('hl-edr') ? 'c-edr' : cls.includes('hl-compat') ? 'c-compat' : cls.includes('hl-env') ? 'c-env' : 'c-biz';
-    const item = document.createElement('div');
-    item.className = 'ol-item ' + colorCls;
-    item.textContent = label.substring(0, 50);
-    item.addEventListener('click', () => scrollToRow(r));
-    outline.appendChild(item);
-  });
-}
-
-let pinnedTooltip = null;
-function showTooltipAt(tr) {
-  const api = tr.dataset.api;
-  if (!api) return;
-  const info = apiInfo[api];
-  if (!info) return;
-  let html = '<div class="tt-api">' + api + '</div>';
-  html += '<div class="tt-alt">Alternative: ' + info.alt + '</div>';
-  if (info.note) html += '<div class="tt-note">' + info.note + '</div>';
-  if (info.ex) html += '<pre><button class="tt-copy" onclick="copyPre(this)" title="Copy"><svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>' + info.ex.replace(/\\n/g, '\n') + '</pre>';
-  tooltip.innerHTML = html;
-  tooltip.style.display = 'block';
-  const rect = tr.getBoundingClientRect();
-  let top = rect.bottom + 4;
-  let left = rect.left + 60;
-  if (top + tooltip.offsetHeight > window.innerHeight) top = rect.top - tooltip.offsetHeight - 4;
-  if (left + tooltip.offsetWidth > window.innerWidth - 270) left = window.innerWidth - 270 - tooltip.offsetWidth - 10;
-  tooltip.style.top = top + 'px';
-  tooltip.style.left = left + 'px';
-  pinnedTooltip = tr;
-}
-function copyPre(btn) {
-  const pre = btn.closest('pre');
-  const text = pre.textContent.trim();
-  navigator.clipboard.writeText(text).then(() => {
-    btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="#6a9955"/></svg>';
-    setTimeout(() => { btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>'; }, 1500);
-  });
-}
-
-content.addEventListener('mousemove', (e) => {
-  const tr = e.target.closest('tr.hl-edr, tr.hl-compat, tr.hl-env, tr.hl-biz');
-  if (tr && tr.dataset.api && !pinnedTooltip) {
-    hoverHint.style.display = 'block';
-    hoverHint.style.left = (e.clientX + 12) + 'px';
-    hoverHint.style.top = (e.clientY - 8) + 'px';
-  } else {
-    hoverHint.style.display = 'none';
-  }
-});
-content.addEventListener('mouseleave', () => { hoverHint.style.display = 'none'; });
-content.addEventListener('click', (e) => {
-  hoverHint.style.display = 'none';
-  const tr = e.target.closest('tr.hl-edr, tr.hl-compat, tr.hl-env, tr.hl-biz');
-  if (!tr) { tooltip.style.display = 'none'; pinnedTooltip = null; return; }
-  if (pinnedTooltip === tr) {
-    tooltip.style.display = 'none'; pinnedTooltip = null;
-  } else {
-    showTooltipAt(tr);
-  }
-});
-"@
-
-        $htmlSubtitle = "$fileName -- $($csvRow.EdrIssues) EDR, $($csvRow.CompatIssues) compat, $($csvRow.EnvIssues) env, $($csvRow.BizIssues) biz, $totalSanitized sanitized"
-        $htmlPath = Join-Path $outDir "${outPrefix}_analyze.html"
-
-        New-HtmlBase -Title "VBA Analysis: $fileName" -Subtitle $htmlSubtitle `
-            -ExtraCss $analyzeCss -SidebarHtml $sidebarSb.ToString() -ContentHtml $contentSb.ToString() `
-            -ExtraHtml $extraHtml -ExtraJs $analyzeJs `
-            -HighlightSelector 'tr.hl-sanitized, tr.hl-edr, tr.hl-compat, tr.hl-env, tr.hl-biz' `
-            -FirstTabIndex $firstHlIdx -OutputPath $htmlPath
+        # === Generate analyze.html ===
+        $htmlPath = Build-AnalyzeHtml -AllModLines $allModLines -ModHighlights $modHighlights -TooltipEntries $tooltipEntries `
+            -OutPrefix $outPrefix -FileName $fileName -CsvRow $csvRow -TotalSanitized $totalSanitized -OutDir $outDir -PatternDefs $patternDefs
 
         # Open HTML for single-file runs
         if ($files.Count -eq 1) { Start-Process $htmlPath }
 
     } catch {
+        $csvRow = [ordered]@{}
+        foreach ($col in $csvColumnNames) { $csvRow[$col] = '' }
+        $csvRow.Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $csvRow.RelativePath = [IO.Path]::GetDirectoryName($relPath)
+        $csvRow.FileName = $fileName
         $csvRow.Error = $_.Exception.Message
         Write-VbaError 'Analyze' $fileName $_.Exception.Message
     }
@@ -1226,41 +1312,24 @@ content.addEventListener('click', (e) => {
     [void]$csvRows.Add($csvRow)
 
     $fileSw = $sw.Elapsed.TotalSeconds
-    Write-VbaResult 'Analyze' $fileName "$($csvRow.EdrIssues) EDR, $($csvRow.CompatIssues) compat, $($csvRow.EnvIssues) env, $($csvRow.BizIssues) biz, $totalSanitized sanitized" $outDir $fileSw
-    Write-VbaLog 'Analyze' $filePath "$($csvRow.TotalModules) modules, $($csvRow.EdrIssues) EDR, $($csvRow.CompatIssues) compat, $($csvRow.EnvIssues) env, $($csvRow.BizIssues) biz, $totalSanitized sanitized | -> $outDir"
+    Write-VbaResult 'Analyze' $fileName "$($csvRow.EdrIssues) EDR, $($csvRow.CompatIssues) compat, $($csvRow.EnvIssues) env, $($csvRow.BizIssues) biz, $($csvRow.SanitizedLines) sanitized" $outDir $fileSw
+    Write-VbaLog 'Analyze' $filePath "$($csvRow.TotalModules) modules, $($csvRow.EdrIssues) EDR, $($csvRow.CompatIssues) compat, $($csvRow.EnvIssues) env, $($csvRow.BizIssues) biz, $($csvRow.SanitizedLines) sanitized | -> $outDir"
 }
 
-# === Write CSV ===
+# === Write CSV using column-definition approach ===
 $csvPath = Join-Path $outDir 'analyze.csv'
 $csvSb = [System.Text.StringBuilder]::new()
-[void]$csvSb.AppendLine('Timestamp,RelativePath,FileName,Bas,Cls,Frm,TotalModules,CodeLines,EdrIssues,CompatIssues,SanitizedLines,References,Error,EnvIssues,BizIssues,InfoCount,RiskLevel,MigrationClass,PrimaryConcern,NeedsReviewBy,TopApiNames,TopComProgIds,SampleEvidence')
+[void]$csvSb.AppendLine($csvColumnNames -join ',')
 
 foreach ($row in $csvRows) {
-    $fields = @(
-        '"' + ($row.Timestamp -replace '"','""') + '"'
-        '"' + ($row.RelativePath -replace '"','""') + '"'
-        '"' + ($row.FileName -replace '"','""') + '"'
-        $row.Bas
-        $row.Cls
-        $row.Frm
-        $row.TotalModules
-        $row.CodeLines
-        $row.EdrIssues
-        $row.CompatIssues
-        $row.SanitizedLines
-        '"' + ($row.References -replace '"','""') + '"'
-        '"' + ($row.Error -replace '"','""') + '"'
-        $row.EnvIssues
-        $row.BizIssues
-        $row.InfoCount
-        '"' + ($row.RiskLevel -replace '"','""') + '"'
-        '"' + ($row.MigrationClass -replace '"','""') + '"'
-        '"' + ($row.PrimaryConcern -replace '"','""') + '"'
-        '"' + ($row.NeedsReviewBy -replace '"','""') + '"'
-        '"' + ($row.TopApiNames -replace '"','""') + '"'
-        '"' + ($row.TopComProgIds -replace '"','""') + '"'
-        '"' + ($row.SampleEvidence -replace '"','""') + '"'
-    )
+    $fields = foreach ($col in $csvColumnNames) {
+        $val = $row[$col]
+        if ($val -is [int] -or $val -is [long] -or $val -is [double]) {
+            $val
+        } else {
+            '"' + ([string]$val -replace '"','""') + '"'
+        }
+    }
     [void]$csvSb.AppendLine($fields -join ',')
 }
 
