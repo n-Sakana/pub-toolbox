@@ -67,6 +67,7 @@ if ($ext -eq '.xls') {
 
         if ($result) {
             # Open patched .xls and save back as original format
+            # Note: Excel will show "invalid key DPx" dialog - click Yes to continue
             $wb = $excel.Workbooks.Open($tempXls, 0, $false)
             if ($ext -eq '.xlam') {
                 $wb.SaveAs($FilePath, 55)  # xlOpenXMLAddIn
