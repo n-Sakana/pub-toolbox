@@ -1,0 +1,31 @@
+{
+  "edr": {
+    "Win32 API (Declare)": { "detect": true, "sanitize": true },
+    "DLL loading": { "detect": true, "sanitize": true },
+    "COM / CreateObject": { "detect": true, "sanitize": false },
+    "Shell / process": { "detect": true, "sanitize": false },
+    "File I/O": { "detect": true, "sanitize": false },
+    "FileSystemObject": { "detect": true, "sanitize": false },
+    "Registry": { "detect": true, "sanitize": false },
+    "SendKeys": { "detect": true, "sanitize": false },
+    "Network / HTTP": { "detect": true, "sanitize": false },
+    "PowerShell / WScript": { "detect": true, "sanitize": false },
+    "Process / WMI": { "detect": true, "sanitize": false },
+    "Clipboard": { "detect": true, "sanitize": false },
+    "Environment": { "detect": true, "sanitize": false },
+    "Auto-execution": { "detect": true, "sanitize": false },
+    "Encoding / obfuscation": { "detect": true, "sanitize": false }
+  },
+  "compat": {
+    "64-bit: Missing PtrSafe": { "detect": true, "sanitize": false },
+    "64-bit: Long for handles": { "detect": true, "sanitize": false },
+    "64-bit: VarPtr/ObjPtr/StrPtr": { "detect": true, "sanitize": false },
+    "Deprecated: DDE": { "detect": true, "sanitize": false },
+    "Deprecated: IE Automation": { "detect": true, "sanitize": false },
+    "Deprecated: Legacy Controls": { "detect": true, "sanitize": false },
+    "Deprecated: DAO": { "detect": true, "sanitize": false },
+    "Legacy: DefType": { "detect": true, "sanitize": false },
+    "Legacy: GoSub": { "detect": true, "sanitize": false },
+    "Legacy: While/Wend": { "detect": true, "sanitize": false }
+  }
+}

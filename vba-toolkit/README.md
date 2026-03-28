@@ -6,41 +6,44 @@ Excel を開かずに VBA プロジェクトをバイナリレベルで操作す
 
 | BAT | 説明 |
 |-----|------|
-| `Extract.bat` | VBA コードをテキスト抽出 + EDR リスク分析 + HTML ビューア |
+| `Extract.bat` | VBA コードをテキスト抽出（モジュール個別 + combined.txt） |
+| `Analyze.bat` | 分析 + サニタイズ + 移行ガイド + CSV ログ |
 | `Diff.bat` | 2つの Excel ファイルの VBA コードを差分比較 |
-| `Sanitize.bat` | Win32 API 宣言と呼び出しをコメントアウト（非破壊） |
-| `Cheatsheet.bat` | Win32 API の移行ガイド（代替手段 + コード例） |
 | `Unlock.bat` | VBA プロジェクトのパスワード保護を解除（非破壊） |
 
 ## 使い方
 
-対象の `.xls` / `.xlsm` / `.xlam` ファイルを BAT にドラッグ＆ドロップ。
-複数ファイルの同時ドロップに対応（Extract, Sanitize, Cheatsheet, Unlock）。
+対象の `.xls` / `.xlsm` / `.xlam` ファイルまたはフォルダを BAT にドラッグ＆ドロップ。
+
+- **Extract**: ファイルまたはフォルダをドロップ → VBA ソースコードをテキスト抽出
+- **Analyze**: 引数なしで設定 GUI、ファイル/フォルダで分析実行
+- **Diff**: 2ファイルをドロップ → サイドバイサイド差分比較
+- **Unlock**: ファイルをドロップ → パスワード保護解除
 
 **元ファイルは一切変更されません。** 全ての出力は `output/` フォルダに集約されます。
 
-## 出力
+## Analyze の3モード
 
-入力ファイルと同じフォルダに `output/` が作成され、実行ごとにタイムスタンプ付きサブフォルダが生成されます。
+1. **設定 GUI**（引数なし）: ダブルクリックで WinForms ダイアログ。パターンごとに Detect / Sanitize を設定。
+2. **ファイル分析**: ファイルをドロップ → EDR リスク + 互換性リスク検出 + サニタイズ + HTML ビューア
+3. **フォルダ分析**: フォルダをドロップ → 再帰走査で全 xlsm/xlam/xls を一括分析
+
+## 出力
 
 ```
 output/
 ├── 20260328_120000_extract/
 │   ├── modules/           .bas / .cls / .frm
-│   ├── analysis.txt       EDR リスク分析
-│   ├── combined.txt       統合ソース
-│   └── extract.html       HTML ビューア
-├── 20260328_120500_sanitize/
-│   ├── sample.xlsm        サニタイズ済みコピー
-│   ├── sanitize.txt       レポート
-│   └── sanitize.html      HTML ビューア
-├── 20260328_121000_cheatsheet/
-│   ├── cheatsheet.txt     移行ガイド
-│   └── cheatsheet.html    HTML ビューア
-├── 20260328_121500_diff/
+│   └── combined.txt       統合ソース
+├── 20260328_120500_analyze/
+│   ├── analyze.csv        分析結果一覧（BOM UTF-8）
+│   ├── sample_analyze.txt テキストレポート
+│   ├── sample_analyze.html HTML ビューア（3カラム）
+│   └── sample.xlsm        サニタイズ済みコピー（該当時のみ）
+├── 20260328_121000_diff/
 │   ├── diff.txt           差分レポート
 │   └── diff.html          HTML ビューア
-└── 20260328_122000_unlock/
+└── 20260328_121500_unlock/
     └── sample.xlsm        パスワード解除済みコピー
 ```
 
@@ -51,18 +54,28 @@ output/
 ```
 vba-toolkit/
 ├── Extract.bat
+├── Analyze.bat
 ├── Diff.bat
-├── Sanitize.bat
-├── Cheatsheet.bat
 ├── Unlock.bat
-├── vba-toolkit.log        実行ログ (自動生成)
-└── lib/
-    ├── VBAToolkit.psm1    共通モジュール (OLE2, VBA圧縮/展開, HTML テンプレート)
-    ├── Extract.ps1
-    ├── Diff.ps1
-    ├── Sanitize.ps1
-    ├── Cheatsheet.ps1
-    └── Unlock.ps1
+├── vba-toolkit.log          実行ログ (自動生成)
+├── config/
+│   └── analyze.json         分析・サニタイズ設定
+├── lib/
+│   ├── VBAToolkit.psm1      共通モジュール (OLE2, VBA圧縮/展開, 分析エンジン, API代替DB, HTML)
+│   ├── Extract.ps1          モジュール抽出
+│   ├── Analyze.ps1          分析 + サニタイズ + 移行ガイド + CSV
+│   ├── Diff.ps1             差分比較
+│   └── Unlock.ps1           パスワード解除
+├── test/
+│   ├── test_sample.xlsm
+│   ├── test_protected.xlsm
+│   ├── test_large.xlsm
+│   ├── test_replacements.ps1
+│   └── csharp-check/
+│       ├── Check.bat
+│       └── Check.ps1
+└── docs/
+    └── consolidation-spec.md
 ```
 
 ## 仕組み

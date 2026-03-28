@@ -971,6 +971,848 @@ function Get-VbaAnalysis {
     }
 }
 
+# ============================================================================
+# API Replacement Database (moved from Cheatsheet.ps1)
+# Covers ALL 26 detection patterns (16 EDR + 10 compat)
+# ============================================================================
+
+$script:VbaApiReplacements = [ordered]@{
+    # --- Timer / Sleep ---
+    'GetTickCount' = @{
+        Lib = 'kernel32'
+        Alt = 'Timer (VBA built-in, Single type)'
+        Example = @'
+' Before:
+Dim t As Long: t = GetTickCount()
+DoSomething
+Debug.Print "Elapsed: " & (GetTickCount() - t) & " ms"
+
+' After:
+Dim t As Single: t = Timer
+DoSomething
+Dim elapsed As Single: elapsed = Timer - t
+If elapsed < 0 Then elapsed = elapsed + 86400  ' midnight rollover
+Debug.Print "Elapsed: " & Format(elapsed * 1000, "0") & " ms"
+'@
+        Note = 'Timer is Single (~15ms resolution), resets at midnight. Add 86400 if elapsed < 0. GetTickCount wraps at ~49.7 days.'
+    }
+    'GetTickCount64' = @{
+        Lib = 'kernel32'
+        Alt = 'Timer (VBA built-in)'
+        Example = '(Same as GetTickCount)'
+        Note = ''
+    }
+    'Sleep' = @{
+        Lib = 'kernel32'
+        Alt = 'Application.Wait (Excel only) or DoEvents loop'
+        Example = @'
+' Before:
+Sleep 1000  ' 1 second
+
+' After (Option A - Excel only, 1sec resolution):
+Application.Wait Now + TimeSerial(0, 0, 1)
+
+' After (Option B - any host, sub-second, busy-wait):
+Dim endTime As Single: endTime = Timer + 0.5  ' 500ms
+Do While Timer < endTime: DoEvents: Loop
+' Note: DoEvents loop uses 100% CPU on one core
+
+' After (Option C - non-blocking delayed execution):
+Application.OnTime Now + TimeSerial(0, 0, 1), "MyCallback"
+'@
+        Note = 'Application.Wait is Excel-only (not Word/Access/Outlook). DoEvents loop is a busy-wait. Application.OnTime is non-blocking but requires a callback Sub.'
+    }
+    'timeGetTime' = @{
+        Lib = 'winmm'
+        Alt = 'Timer (VBA built-in)'
+        Example = '(Same as GetTickCount)'
+        Note = ''
+    }
+    'QueryPerformanceCounter' = @{
+        Lib = 'kernel32'
+        Alt = 'No equivalent for high-resolution timing. Timer (~15ms) for rough measurements.'
+        Example = @'
+' Before:
+QueryPerformanceCounter startCount
+DoSomething
+QueryPerformanceCounter endCount
+elapsed = (endCount - startCount) / freq
+
+' After (rough timing only):
+Dim t As Single: t = Timer
+DoSomething
+Debug.Print "Elapsed: " & Format((Timer - t) * 1000, "0") & " ms"
+'@
+        Note = 'QPC provides sub-microsecond precision. Timer provides ~15ms at best. No pure VBA equivalent for high-resolution timing.'
+    }
+    'QueryPerformanceFrequency' = @{
+        Lib = 'kernel32'
+        Alt = '(Remove together with QueryPerformanceCounter)'
+        Example = ''
+        Note = ''
+    }
+
+    # --- String / Memory ---
+    'CopyMemory' = @{
+        Lib = 'kernel32 (RtlMoveMemory)'
+        Alt = 'LSet (UDT copy), array assignment, or byte-by-byte copy'
+        Example = @'
+' Before:
+CopyMemory ByVal dest, ByVal src, length
+
+' After (byte arrays - direct assignment):
+destBytes() = sourceBytes()
+
+' After (byte-by-byte):
+Dim i As Long
+For i = 0 To length - 1
+    dest(i) = src(i)
+Next i
+
+' After (UDT to UDT of same size):
+LSet destUDT = sourceUDT
+
+' After (in-place string modification):
+Mid$(dest, pos, length) = Mid$(src, 1, length)
+'@
+        Note = 'LSet copies between UDTs of the same size without API. Mid$ as a statement (left-hand side) modifies strings in-place.'
+    }
+    'lstrlen' = @{
+        Lib = 'kernel32'
+        Alt = 'Len / LenB (VBA built-in)'
+        Example = @'
+' Before:
+length = lstrlen(ByVal ptr)
+
+' After:
+length = Len(str)     ' character count
+length = LenB(str)    ' byte count (= Len * 2 in VBA Unicode)
+'@
+        Note = 'If original code used lstrlen for ANSI buffer sizing, use LenB instead of Len.'
+    }
+
+    # --- User / System info ---
+    'GetUserName' = @{
+        Lib = 'advapi32'
+        Alt = 'Environ$("USERNAME") for Windows login name'
+        Example = @'
+' Before:
+Dim buf As String: buf = Space(256)
+Dim sz As Long: sz = 256
+GetUserName buf, sz
+userName = Left$(buf, sz - 1)
+
+' After (Windows login name):
+userName = Environ$("USERNAME")
+
+' CAUTION: Application.UserName is the Office display name,
+' NOT the Windows login. These are often different in
+' corporate environments.
+'@
+        Note = 'Environ$("USERNAME") = Windows login. Application.UserName = Office display name. These differ in corporate environments.'
+    }
+    'GetComputerName' = @{
+        Lib = 'kernel32'
+        Alt = 'Environ$("COMPUTERNAME")'
+        Example = @'
+' Before:
+Dim buf As String: buf = Space(256)
+Dim sz As Long: sz = 256
+GetComputerName buf, sz
+compName = Left$(buf, sz - 1)
+
+' After:
+compName = Environ$("COMPUTERNAME")
+'@
+        Note = 'Environ$ returns empty string if variable is not set. Always validate the result.'
+    }
+    'GetTempPath' = @{
+        Lib = 'kernel32'
+        Alt = 'Environ$("TEMP")'
+        Example = @'
+' Before:
+Dim buf As String: buf = Space(260)
+GetTempPath 260, buf
+tmpPath = Left$(buf, InStr(buf, vbNullChar) - 1)
+
+' After:
+tmpPath = Environ$("TEMP") & "\"
+' Note: API appends trailing "\", Environ$ does not.
+'@
+        Note = 'GetTempPath appends trailing backslash. Environ$("TEMP") does not. Add "\" when concatenating paths.'
+    }
+    'GetSystemDirectory' = @{
+        Lib = 'kernel32'
+        Alt = 'Environ$("WINDIR") & "\System32"'
+        Example = ''
+        Note = 'Caution: 32-bit Office on 64-bit Windows uses SysWOW64. Environ$ always returns System32. Behavior may differ from the original API call.'
+    }
+    'GetWindowsDirectory' = @{
+        Lib = 'kernel32'
+        Alt = 'Environ$("WINDIR")'
+        Example = ''
+        Note = ''
+    }
+
+    # --- Window / UI ---
+    'FindWindow' = @{
+        Lib = 'user32'
+        Alt = 'Application.hWnd (own window only, Excel 2010+) or AppActivate'
+        Example = @'
+' Before:
+hWnd = FindWindow(vbNullString, "Window Title")
+
+' After (get own Excel window handle):
+hWnd = Application.hWnd  ' Excel 2010+
+
+' After (activate by title - no handle returned):
+AppActivate "Window Title"
+'@
+        Note = 'Application.hWnd only returns the host app window handle. FindWindow for other app windows has no VBA equivalent. AppActivate does partial title matching - may activate wrong window.'
+    }
+    'SetWindowPos' = @{
+        Lib = 'user32'
+        Alt = 'UserForm position properties (positioning only, no topmost)'
+        Example = @'
+' Before:
+SetWindowPos hWnd, HWND_TOPMOST, x, y, w, h, SWP_NOSIZE
+
+' After (UserForm positioning only):
+Me.StartUpPosition = 0
+Me.Left = x: Me.Top = y
+
+' For "stay visible" behavior:
+frm.Show vbModeless
+'@
+        Note = 'No VBA equivalent for HWND_TOPMOST. Positioning alternative applies to UserForms only, not the application window. vbModeless keeps form visible while user works.'
+    }
+    'GetSystemMetrics' = @{
+        Lib = 'user32'
+        Alt = 'Application.UsableWidth/Height (Excel, in points) - no pixel equivalent'
+        Example = @'
+' Before:
+screenW = GetSystemMetrics(SM_CXSCREEN)  ' pixels
+screenH = GetSystemMetrics(SM_CYSCREEN)  ' pixels
+
+' After (Excel - workspace size in points, excludes taskbar):
+workW = Application.UsableWidth    ' points
+workH = Application.UsableHeight   ' points
+' Note: 1 point = 1/72 inch. NOT pixels.
+
+' CAUTION: Application.Width/Height is the Excel
+' WINDOW size, not the screen size.
+'@
+        Note = 'Application.UsableWidth/Height = workspace in points (Excel only). For pixels, no pure VBA equivalent. In Access: Screen.Width/Height (twips).'
+    }
+    'ShowWindow' = @{
+        Lib = 'user32'
+        Alt = 'Application.Visible, WindowState, or UserForm.Show/Hide'
+        Example = @'
+' Before:
+ShowWindow hWnd, SW_SHOW
+ShowWindow hWnd, SW_MINIMIZE
+ShowWindow hWnd, SW_MAXIMIZE
+
+' After:
+Application.Visible = True          ' show
+Application.WindowState = xlMinimized  ' minimize
+Application.WindowState = xlMaximized  ' maximize
+Application.WindowState = xlNormal     ' restore
+
+' For UserForm:
+frm.Show / frm.Hide
+'@
+        Note = ''
+    }
+    'SetForegroundWindow' = @{
+        Lib = 'user32'
+        Alt = 'AppActivate (VBA built-in)'
+        Example = @'
+' Before:
+SetForegroundWindow hWnd
+
+' After:
+On Error Resume Next  ' raises error 5 if not found
+AppActivate "Window Title"
+On Error GoTo 0
+'@
+        Note = 'AppActivate does partial title matching - may activate the wrong window if titles are similar. Always wrap in error handling.'
+    }
+    'SendMessage' = @{
+        Lib = 'user32'
+        Alt = 'Depends on message type. Often no direct alternative.'
+        Example = ''
+        Note = 'SendMessage is highly versatile. Review each call site individually. Common uses: scrolling listboxes, setting control properties. If used for external app automation, the business process itself may need redesign.'
+    }
+    'PostMessage' = @{
+        Lib = 'user32'
+        Alt = '(Same as SendMessage - review individually)'
+        Example = ''
+        Note = ''
+    }
+
+    # --- File ---
+    'SHFileOperation' = @{
+        Lib = 'shell32'
+        Alt = 'FileCopy / Kill / Name / MkDir / RmDir or FileSystemObject'
+        Example = @'
+' Before:
+SHFileOperation fileOp  ' copy/move/delete with recycle bin
+
+' After:
+' Copy file:   FileCopy src, dst
+' Move/rename: Name src As dst
+' Delete:      Kill path  ' permanent, no recycle bin
+' Create dir:  MkDir path
+' Remove dir:  RmDir path  ' must be empty
+
+' Or use FileSystemObject for folders:
+' fso.CopyFolder / fso.DeleteFolder / fso.MoveFolder
+' Note: fso.DeleteFile is also permanent (no recycle bin)
+
+' Delete (recycle bin): no pure VBA equivalent
+'@
+        Note = 'Kill does not support wildcards in the path portion (only filename). Recycle bin delete has no VBA equivalent. FileSystemObject may also be restricted by EDR.'
+    }
+    'ShellExecute' = @{
+        Lib = 'shell32'
+        Alt = 'ThisWorkbook.FollowHyperlink (documents) or Shell (executables only)'
+        Example = @'
+' Before:
+ShellExecute 0, "open", path, vbNullString, vbNullString, SW_SHOW
+
+' After (open document/URL with default app - Excel only):
+ThisWorkbook.FollowHyperlink path
+' Note: may trigger security warnings
+
+' After (run executable only - not documents):
+Shell "notepad.exe C:\file.txt", vbNormalFocus
+' CAUTION: Shell cannot open .pdf, .xlsx etc.
+' by file association. Use FollowHyperlink instead.
+'@
+        Note = 'Shell only launches executables, not documents by association. FollowHyperlink is Excel-specific and may trigger security prompts.'
+    }
+
+    # --- Clipboard ---
+    'OpenClipboard' = @{
+        Lib = 'user32'
+        Alt = 'MSForms.DataObject (text only)'
+        Example = @'
+' Before:
+OpenClipboard 0
+hData = GetClipboardData(CF_TEXT)
+' ...
+CloseClipboard
+
+' After (text only):
+Dim d As New MSForms.DataObject
+d.GetFromClipboard
+text = d.GetText
+'@
+        Note = 'MSForms.DataObject handles text only (no images/files). Requires Microsoft Forms 2.0 reference. Add error handling for clipboard lock failures.'
+    }
+    'GetClipboardData' = @{
+        Lib = 'user32'
+        Alt = '(See OpenClipboard - text only via MSForms.DataObject)'
+        Example = ''
+        Note = ''
+    }
+    'SetClipboardData' = @{
+        Lib = 'user32'
+        Alt = 'MSForms.DataObject.SetText / PutInClipboard (text only)'
+        Example = ''
+        Note = ''
+    }
+    'CloseClipboard' = @{
+        Lib = 'user32'
+        Alt = '(Remove together with OpenClipboard)'
+        Example = ''
+        Note = ''
+    }
+
+    # --- EDR pattern-level entries (keyed by detection pattern name) ---
+    'COM / CreateObject' = @{
+        Lib = '(COM)'
+        Alt = 'Review each ProgID. FSO -> Dir$/FileCopy/MkDir. ADODB -> keep if needed.'
+        Example = @'
+' Before:
+Dim fso As Object
+Set fso = CreateObject("Scripting.FileSystemObject")
+
+' After (early binding - requires reference):
+Dim fso As New Scripting.FileSystemObject
+
+' After (use VBA built-in instead of FSO):
+' Dir(), Open, Kill, FileCopy, MkDir, RmDir
+' (preferred in EDR environments - no COM needed)
+'@
+        Note = 'CreateObject itself is usually not blocked by EDR. Review if the created object is problematic.'
+    }
+    'COM / GetObject' = @{
+        Lib = '(COM)'
+        Alt = 'Replace WMI queries with Application object properties where possible'
+        Example = @'
+' Before:
+Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+Set xlApp = GetObject(, "Excel.Application")
+
+' After (attach to running Excel):
+' Use Application object directly (already in scope)
+Dim wb As Workbook
+Set wb = Workbooks("Book1.xlsx")
+'@
+        Note = 'GetObject("winmgmts:") for process info can often be eliminated.'
+    }
+    'Shell / process' = @{
+        Lib = '(VBA)'
+        Alt = 'ThisWorkbook.FollowHyperlink (documents) or redesign workflow'
+        Example = @'
+' Before:
+Shell "notepad.exe C:\log.txt", vbNormalFocus
+Shell "cmd /c del C:\temp\*.tmp"
+
+' After (open document):
+ThisWorkbook.FollowHyperlink "C:\log.txt"
+
+' After (delete files with VBA):
+Kill "C:\temp\*.tmp"
+
+' After (run macro in another workbook):
+Application.Run "'Other.xlsm'!MacroName"
+'@
+        Note = 'Shell and cmd are primary EDR targets. Avoid launching external processes.'
+    }
+    'File I/O' = @{
+        Lib = '(VBA)'
+        Alt = 'VBA standard file I/O is generally safe. No change needed.'
+        Example = @'
+' Before (binary read via API):
+' CopyMemory / ReadFile API calls
+
+' After (VBA native binary read):
+Open path For Binary Access Read As #1
+Dim buf() As Byte: ReDim buf(LOF(1) - 1)
+Get #1, , buf: Close #1
+'@
+        Note = 'Detected for awareness. Open/Kill/FileCopy are not typically blocked by EDR.'
+    }
+    'FileSystemObject' = @{
+        Lib = '(COM)'
+        Alt = 'Dir$, FileCopy, MkDir, RmDir, Kill (VBA built-in)'
+        Example = @'
+' Before:
+Dim fso As Object
+Set fso = CreateObject("Scripting.FileSystemObject")
+If fso.FileExists(path) Then fso.CopyFile src, dst
+
+' After (VBA built-in):
+If Dir(path) <> "" Then FileCopy src, dst
+'@
+        Note = 'FSO is more capable but VBA built-ins cover most use cases.'
+    }
+    'Registry' = @{
+        Lib = '(VBA)'
+        Alt = 'Store settings in Excel sheet, JSON file, or CustomDocumentProperties'
+        Example = @'
+' Before:
+SaveSetting "MyApp", "Config", "LastRun", Now()
+val = GetSetting("MyApp", "Config", "LastRun", "")
+
+' After (INI-style config file):
+Dim configPath As String
+configPath = ThisWorkbook.Path & "\config.ini"
+Open configPath For Output As #1
+Print #1, "LastRun=" & Now(): Close #1
+'@
+        Note = 'GetSetting/SaveSetting use VBA-specific registry area. Consider file-based config.'
+    }
+    'SendKeys' = @{
+        Lib = '(VBA)'
+        Alt = 'No direct alternative. Redesign to avoid UI automation.'
+        Example = @'
+' Before:
+SendKeys "^c"       ' Ctrl+C
+SendKeys "{ENTER}"  ' press Enter
+
+' After (copy via object model):
+Selection.Copy
+' After (activate/close):
+ActiveWorkbook.Close SaveChanges:=True
+'@
+        Note = 'SendKeys is fragile and blocked by many EDR policies. Rethink the workflow.'
+    }
+    'Network / HTTP' = @{
+        Lib = '(COM)'
+        Alt = 'No alternative if network access is required. Verify EDR policy.'
+        Example = @'
+' Before:
+Dim http As Object
+Set http = CreateObject("MSXML2.XMLHTTP")
+http.Open "GET", url, False: http.Send
+data = http.responseText
+
+' After (Power Query - preferred, no VBA needed):
+' Data tab > Get Data > From Web > enter URL
+'@
+        Note = 'XMLHTTP/WinHttp may be allowed. Test in target environment.'
+    }
+    'PowerShell / WScript' = @{
+        Lib = '(Shell)'
+        Alt = 'No alternative. Remove script execution or redesign.'
+        Example = @'
+' Before:
+Shell "powershell -Command ""Get-Process"""
+Set wsh = CreateObject("WScript.Shell")
+wsh.Run "cscript //nologo script.vbs"
+
+' After:
+' Move .vbs logic into a VBA module and call it directly
+Call MyConvertedSubroutine
+'@
+        Note = 'Script hosts are the highest-risk EDR target. Almost always blocked.'
+    }
+    'Process / WMI' = @{
+        Lib = '(COM)'
+        Alt = 'Use Application object properties instead of WMI queries'
+        Example = @'
+' Before:
+Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+Set os = wmi.ExecQuery("SELECT Caption FROM Win32_OperatingSystem")
+
+' After (system info via Environ$):
+userName = Environ$("USERNAME")
+compName = Environ$("COMPUTERNAME")
+osInfo = Environ$("OS")
+'@
+        Note = 'WMI process enumeration is rarely needed in Excel VBA. Remove if possible.'
+    }
+    'DLL loading' = @{
+        Lib = '(API)'
+        Alt = 'Remove dynamic DLL loading. Use static Declare instead.'
+        Example = @'
+' Before (dynamic loading):
+Dim hLib As LongPtr
+hLib = LoadLibrary("custom.dll")
+Dim pFunc As LongPtr
+pFunc = GetProcAddress(hLib, "MyFunc")
+FreeLibrary hLib
+
+' After (static declaration):
+Declare PtrSafe Function MyFunc Lib "custom.dll" () As Long
+'@
+        Note = 'LoadLibrary/GetProcAddress pattern is blocked by EDR.'
+    }
+    'Clipboard' = @{
+        Lib = '(COM/API)'
+        Alt = 'MSForms.DataObject for text clipboard (Forms 2.0 reference required)'
+        Example = @'
+' Before (API-based clipboard):
+OpenClipboard 0
+hData = GetClipboardData(CF_TEXT)
+CloseClipboard
+
+' After (text via MSForms.DataObject):
+Dim d As New MSForms.DataObject
+d.GetFromClipboard
+txt = d.GetText
+'@
+        Note = 'Text only. No image/file clipboard support.'
+    }
+    'Environment' = @{
+        Lib = '(VBA)'
+        Alt = 'No change needed. Environ$ is VBA standard.'
+        Example = @'
+' Environ$() itself IS the recommended alternative for API calls.
+' Common safe Environ$ values:
+userName = Environ$("USERNAME")
+compName = Environ$("COMPUTERNAME")
+tempDir  = Environ$("TEMP")
+'@
+        Note = 'Detected for awareness. Not typically blocked by EDR.'
+    }
+    'Auto-execution' = @{
+        Lib = '(VBA)'
+        Alt = 'No change needed. Configure macro security settings.'
+        Example = @'
+' Before (heavy Auto_Open):
+Sub Auto_Open()
+    ConnectToDatabase
+    DownloadUpdates
+    Shell "powershell ..."
+End Sub
+
+' After (minimal Auto_Open + user-triggered):
+Sub Auto_Open()
+    MsgBox "Click [Initialize] on the ribbon to start.", vbInformation
+End Sub
+'@
+        Note = 'Auto_Open/Workbook_Open are standard VBA entry points.'
+    }
+    'Encoding / obfuscation' = @{
+        Lib = '(VBA)'
+        Alt = 'Replace Chr$() with string literals'
+        Example = @'
+' Before (obfuscated):
+path = Chr$(67) & Chr$(58) & Chr$(92)  ' "C:\"
+cmd = Chr(112) & Chr(111) & Chr(119) & Chr(101) & Chr(114) & Chr(115) & Chr(104) & Chr(101) & Chr(108) & Chr(108)
+
+' After (plain text):
+path = "C:\"
+cmd = "powershell"
+'@
+        Note = 'Heavy Chr$() usage looks suspicious to EDR. Use "..." instead.'
+    }
+
+    # --- Compatibility / Legacy pattern-level entries ---
+    'Declare without PtrSafe' = @{
+        Lib = '(any)'
+        Alt = 'Add PtrSafe keyword + review parameter types for LongPtr'
+        Example = @'
+' Before:
+Declare Function GetWindow Lib "user32" (ByVal hWnd As Long) As Long
+
+' After:
+Declare PtrSafe Function GetWindow Lib "user32" (ByVal hWnd As LongPtr) As LongPtr
+'@
+        Note = '64-bit Office requires PtrSafe on all Declare statements. Handle/pointer params must be LongPtr.'
+    }
+    '64-bit: Missing PtrSafe' = @{
+        Lib = '(any)'
+        Alt = 'Add PtrSafe keyword + review parameter types for LongPtr'
+        Example = @'
+' Before:
+Declare Function GetWindow Lib "user32" (ByVal hWnd As Long) As Long
+
+' After:
+Declare PtrSafe Function GetWindow Lib "user32" (ByVal hWnd As LongPtr) As LongPtr
+'@
+        Note = '64-bit Office requires PtrSafe on all Declare statements.'
+    }
+    'Long for handles' = @{
+        Lib = '(any)'
+        Alt = 'Change As Long to As LongPtr for handles, pointers, and HWNDs in PtrSafe Declare'
+        Example = @'
+' Before:
+Declare PtrSafe Function FindWindow Lib "user32" _
+    Alias "FindWindowA" (ByVal lpClass As String, ByVal lpWindow As String) As Long
+
+' After:
+Declare PtrSafe Function FindWindow Lib "user32" _
+    Alias "FindWindowA" (ByVal lpClass As String, ByVal lpWindow As String) As LongPtr
+'@
+        Note = 'On 64-bit Office, handles and pointers are 8 bytes. Using Long (4 bytes) truncates them, causing crashes or silent corruption.'
+    }
+    '64-bit: Long for handles' = @{
+        Lib = '(any)'
+        Alt = 'Change handle/pointer parameters from Long to LongPtr'
+        Example = @'
+' Before:
+Declare PtrSafe Function FindWindow Lib "user32" _
+    Alias "FindWindowA" (ByVal lpClass As String, ByVal lpWindow As String) As Long
+
+' After:
+Declare PtrSafe Function FindWindow Lib "user32" _
+    Alias "FindWindowA" (ByVal lpClass As String, ByVal lpWindow As String) As LongPtr
+'@
+        Note = 'HWND, HINSTANCE, pointers are 8 bytes on 64-bit. Long is always 4 bytes.'
+    }
+    'VarPtr' = @{
+        Lib = '(VBA)'
+        Alt = 'Assign VarPtr/ObjPtr/StrPtr results to LongPtr variables on 64-bit'
+        Example = @'
+' Before:
+Dim addr As Long
+addr = VarPtr(myVar)
+
+' After (64-bit safe):
+Dim addr As LongPtr
+addr = VarPtr(myVar)
+'@
+        Note = 'VarPtr/ObjPtr/StrPtr return LongPtr on 64-bit VBA7. Storing in Long truncates the address.'
+    }
+    '64-bit: VarPtr/ObjPtr/StrPtr' = @{
+        Lib = '(VBA)'
+        Alt = 'Store result in LongPtr variable'
+        Example = @'
+' Before:
+Dim addr As Long
+addr = VarPtr(myVar)
+
+' After:
+Dim addr As LongPtr
+addr = VarPtr(myVar)
+'@
+        Note = 'These functions return LongPtr on 64-bit.'
+    }
+    'DDEInitiate' = @{
+        Lib = '(DDE)'
+        Alt = 'COM Automation or Application.Run for inter-app communication'
+        Example = @'
+' Before:
+ch = DDEInitiate("Excel", "Sheet1")
+DDEExecute ch, "[OPEN(""file.xls"")]"
+DDETerminate ch
+
+' After (COM Automation):
+Dim xlApp As Object
+Set xlApp = GetObject(, "Excel.Application")
+xlApp.Workbooks.Open "file.xls"
+'@
+        Note = 'DDE is deprecated and disabled by default in modern Office. Use COM Automation instead.'
+    }
+    'Deprecated: DDE' = @{
+        Lib = '(DDE)'
+        Alt = 'COM Automation or Application.Run for inter-app communication'
+        Example = ''
+        Note = 'DDE is deprecated and disabled by default in modern Office.'
+    }
+    'InternetExplorer.Application' = @{
+        Lib = '(COM)'
+        Alt = 'MSXML2.XMLHTTP for HTTP requests, or Selenium/Edge WebDriver for browser automation'
+        Example = @'
+' Before:
+Dim ie As Object
+Set ie = CreateObject("InternetExplorer.Application")
+ie.Navigate "https://example.com"
+
+' After (HTTP request only):
+Dim http As Object
+Set http = CreateObject("MSXML2.XMLHTTP")
+http.Open "GET", "https://example.com", False
+http.Send
+Dim html As String: html = http.responseText
+'@
+        Note = 'Internet Explorer has been removed from Windows.'
+    }
+    'Deprecated: IE Automation' = @{
+        Lib = '(COM)'
+        Alt = 'MSXML2.XMLHTTP for HTTP requests, or Edge WebDriver for browser automation'
+        Example = ''
+        Note = 'Internet Explorer has been removed from Windows.'
+    }
+    'MSComctlLib' = @{
+        Lib = '(OCX)'
+        Alt = 'Use ListView/TreeView from MSComctlLib if available, or replace with ListBox/UserForm controls'
+        Example = ''
+        Note = 'Microsoft released 64-bit MSCOMCTL.OCX (KB2687441, updated). If available, re-register it.'
+    }
+    'MSComDlg.CommonDialog' = @{
+        Lib = '(OCX)'
+        Alt = 'Application.GetOpenFilename / GetSaveAsFilename (Excel) or Application.FileDialog'
+        Example = ''
+        Note = 'MSComDlg.CommonDialog (COMDLG32.OCX) has no 64-bit version. Use Application.FileDialog.'
+    }
+    'MSCAL.Calendar' = @{
+        Lib = '(OCX)'
+        Alt = 'MonthView control (MS Date and Time Picker) or custom UserForm'
+        Example = ''
+        Note = 'MSCAL.Calendar (mscal.ocx) has no 64-bit version and is removed from Office 2010+.'
+    }
+    'Deprecated: Legacy Controls' = @{
+        Lib = '(OCX)'
+        Alt = 'Use Application.FileDialog, ListBox, or updated 64-bit OCX'
+        Example = ''
+        Note = 'Legacy ActiveX controls (MSCAL, MSComDlg, MSComctlLib) may not have 64-bit versions.'
+    }
+    'DAO.Database' = @{
+        Lib = '(DAO)'
+        Alt = 'ADO (ADODB.Connection / ADODB.Recordset) or CurrentDb in Access'
+        Example = @'
+' Before:
+Dim db As DAO.Database
+Set db = DBEngine.OpenDatabase("C:\data.mdb")
+
+' After (ADO):
+Dim cn As Object
+Set cn = CreateObject("ADODB.Connection")
+cn.Open "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=C:\data.mdb"
+'@
+        Note = 'DAO is still supported in Access (via CurrentDb) but standalone DAO references should migrate to ADO.'
+    }
+    'Deprecated: DAO' = @{
+        Lib = '(DAO)'
+        Alt = 'ADO (ADODB.Connection / ADODB.Recordset) or CurrentDb in Access'
+        Example = ''
+        Note = 'Standalone DAO references should migrate to ADO for better compatibility.'
+    }
+    'DefLng' = @{
+        Lib = '(VBA)'
+        Alt = 'Explicit variable declarations with Dim ... As Long'
+        Example = @'
+' Before:
+DefLng A-Z
+
+' After:
+' Remove DefLng and add explicit type declarations:
+Dim count As Long
+Dim index As Long
+'@
+        Note = 'DefType statements make code harder to read and maintain. Use Option Explicit.'
+    }
+    'Legacy: DefType' = @{
+        Lib = '(VBA)'
+        Alt = 'Explicit variable declarations with Dim ... As Type'
+        Example = ''
+        Note = 'DefType statements make code harder to read. Use Option Explicit and declare each variable.'
+    }
+    'GoSub' = @{
+        Lib = '(VBA)'
+        Alt = 'Refactor into separate Sub or Function procedures'
+        Example = @'
+' Before:
+Sub Main()
+    GoSub DoWork
+    Exit Sub
+DoWork:
+    MsgBox "Working"
+    Return
+End Sub
+
+' After:
+Sub Main()
+    DoWork
+End Sub
+Private Sub DoWork()
+    MsgBox "Working"
+End Sub
+'@
+        Note = 'GoSub/Return is a legacy construct from BASIC. Refactor into standalone Sub/Function.'
+    }
+    'Legacy: GoSub' = @{
+        Lib = '(VBA)'
+        Alt = 'Refactor into separate Sub or Function procedures'
+        Example = ''
+        Note = 'GoSub/Return is a legacy construct. Refactor into standalone Sub/Function.'
+    }
+    'While/Wend' = @{
+        Lib = '(VBA)'
+        Alt = 'Do While ... Loop (supports Exit Do)'
+        Example = @'
+' Before:
+While condition
+    DoSomething
+Wend
+
+' After:
+Do While condition
+    DoSomething
+    If needExit Then Exit Do
+Loop
+'@
+        Note = 'While...Wend cannot be exited early. Do While...Loop supports Exit Do.'
+    }
+    'Legacy: While/Wend' = @{
+        Lib = '(VBA)'
+        Alt = 'Do While ... Loop (supports Exit Do)'
+        Example = ''
+        Note = 'While...Wend cannot be exited early. Do While...Loop supports Exit Do.'
+    }
+}
+
+function Get-VbaApiReplacements {
+    return $script:VbaApiReplacements
+}
+
 Export-ModuleMember -Function Read-Ole2, Read-Ole2Stream, Write-Ole2Stream,
     Decompress-VBA, Compress-VBA,
     Get-VbaProjectBytes, Save-VbaProjectBytes,
@@ -978,4 +1820,4 @@ Export-ModuleMember -Function Read-Ole2, Read-Ole2Stream, Write-Ole2Stream,
     New-HtmlBase, New-HtmlCodeView,
     Resolve-VbaFilePath, New-VbaOutputDir,
     Write-VbaLog, Write-VbaStatus, Write-VbaResult, Write-VbaError, Write-VbaHeader,
-    Get-VbaCodepage, Get-AllModuleCode, Get-VbaAnalysis
+    Get-VbaCodepage, Get-AllModuleCode, Get-VbaAnalysis, Get-VbaApiReplacements
