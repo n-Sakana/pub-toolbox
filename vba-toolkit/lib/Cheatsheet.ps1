@@ -465,19 +465,22 @@ body { font-family: Consolas, 'Courier New', monospace; font-size: 13px; backgro
 .code-table .code { color: #d4d4d4; }
 tr.hl-api td.code { background: #1b2e4a; color: #a0c4f0; cursor: pointer; }
 tr.hl-api td.ln { color: #cccccc; }
+.hover-hint { position: fixed; background: #444; color: #ccc; padding: 2px 8px; border-radius: 3px; font-size: 11px; pointer-events: none; z-index: 50; display: none; }
 .outline { width: 250px; min-width: 250px; background: #252526; border-left: 1px solid #3c3c3c; overflow-y: auto; padding: 8px 0; }
 .outline .ol-header { padding: 6px 12px; font-size: 11px; color: #888; text-transform: uppercase; }
 .outline .ol-api { padding: 4px 12px 2px; font-size: 13px; color: #4fc1ff; font-weight: bold; }
-.outline .ol-alt { display: none; }
 .outline .ol-loc { padding: 2px 12px 2px 24px; font-size: 12px; color: #888; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .outline .ol-loc:hover { color: #d4d4d4; background: #2a2d2e; }
 .outline .ol-sep { border-top: 1px solid #3c3c3c; margin: 6px 12px; }
-.tooltip { position: fixed; background: #2d2d2d; border: 1px solid #555; border-radius: 4px; padding: 10px 14px; max-width: 500px; z-index: 100; display: none; font-size: 12px; line-height: 1.5; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+.tooltip { position: fixed; background: #2d2d2d; border: 1px solid #555; border-radius: 4px; padding: 10px 14px; max-width: 500px; z-index: 100; display: none; font-size: 12px; line-height: 1.5; box-shadow: 0 4px 12px rgba(0,0,0,0.5); user-select: text; }
 .tooltip .tt-api { color: #4fc1ff; font-weight: bold; font-size: 14px; }
 .tooltip .tt-alt { color: #6a9955; margin-top: 4px; }
 .tooltip .tt-note { color: #b0b0b0; font-style: italic; margin-top: 4px; }
-.tooltip pre { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; padding: 8px; margin-top: 6px; font-size: 11px; line-height: 1.4; max-height: 200px; overflow-y: auto; }
+.tooltip pre { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; padding: 8px; margin-top: 6px; font-size: 11px; line-height: 1.4; max-height: 200px; overflow-y: auto; position: relative; }
 .tooltip pre .cmt { color: #6a9955; }
+.tooltip .tt-copy { position: absolute; top: 6px; right: 6px; background: none; border: none; cursor: pointer; opacity: 0.5; padding: 2px; }
+.tooltip .tt-copy:hover { opacity: 1; }
+.tooltip .tt-copy svg { width: 14px; height: 14px; fill: #ccc; }
 .minimap { position: fixed; right: 250px; top: 52px; width: 14px; bottom: 0; background: #1e1e1e; border-left: 1px solid #3c3c3c; z-index: 20; cursor: pointer; }
 .minimap .mark { position: absolute; right: 2px; width: 10px; height: 3px; border-radius: 1px; background: #4fc1ff; }
 .minimap .viewport { position: absolute; right: 0; width: 14px; background: rgba(255,255,255,0.25); border-radius: 2px; pointer-events: none; }
@@ -546,12 +549,14 @@ foreach ($modLabel in $allModCode.Keys) {
 <div class="outline" id="outline"></div>
 </div>
 <div class="tooltip" id="tooltip"></div>
+<div class="hover-hint" id="hoverHint">Click for details</div>
 <script>
 const content = document.querySelector('.content');
 const minimap = document.getElementById('minimap');
 const viewport = document.getElementById('viewport');
 const outline = document.getElementById('outline');
 const tooltip = document.getElementById('tooltip');
+const hoverHint = document.getElementById('hoverHint');
 
 const apiInfo = {
 "@)
@@ -583,8 +588,18 @@ function showTab(idx) {
   updateMinimap();
 }
 
+function scrollToRow(r) {
+  const rRect = r.getBoundingClientRect();
+  const cRect = content.getBoundingClientRect();
+  const offset = rRect.top - cRect.top + content.scrollTop;
+  content.scrollTo({ top: offset - content.clientHeight / 3, behavior: 'smooth' });
+}
+
 function updateOutline() {
-  outline.innerHTML = '<div class="ol-header">API Usage</div>';
+  outline.innerHTML = '';
+  const hdr = document.createElement('div');
+  hdr.className = 'ol-header'; hdr.textContent = 'API Usage';
+  outline.appendChild(hdr);
   const mod = document.querySelector('.module.active');
   if (!mod) return;
   const rows = mod.querySelectorAll('tr.hl-api');
@@ -592,33 +607,32 @@ function updateOutline() {
   rows.forEach(r => {
     const api = r.dataset.api;
     if (api !== lastApi) {
-      if (lastApi) outline.innerHTML += '<div class="ol-sep"></div>';
-      outline.innerHTML += '<div class="ol-api">' + api + '</div>';
-      const info = apiInfo[api];
-      if (info) outline.innerHTML += '<div class="ol-alt">' + info.alt + '</div>';
+      if (lastApi) { const sep = document.createElement('div'); sep.className = 'ol-sep'; outline.appendChild(sep); }
+      const apiDiv = document.createElement('div');
+      apiDiv.className = 'ol-api'; apiDiv.textContent = api;
+      outline.appendChild(apiDiv);
       lastApi = api;
     }
     const ln = r.querySelector('.ln').textContent;
     const code = r.querySelector('.code').textContent.trim().substring(0, 50);
-    const div = document.createElement('div');
-    div.className = 'ol-loc';
-    div.textContent = 'L' + ln + ': ' + code;
-    div.addEventListener('click', () => r.scrollIntoView({block:'center'}));
-    outline.appendChild(div);
+    const loc = document.createElement('div');
+    loc.className = 'ol-loc';
+    loc.textContent = 'L' + ln + ': ' + code;
+    loc.addEventListener('click', () => scrollToRow(r));
+    outline.appendChild(loc);
   });
 }
 
-// Tooltip on hover
-document.addEventListener('mouseover', (e) => {
-  const tr = e.target.closest('tr.hl-api');
-  if (!tr) { tooltip.style.display = 'none'; return; }
+// Tooltip: click to pin, click again or X to close
+let pinnedTooltip = null;
+function showTooltipAt(tr) {
   const api = tr.dataset.api;
   const info = apiInfo[api];
   if (!info) return;
   let html = '<div class="tt-api">' + api + '</div>';
   html += '<div class="tt-alt">Alternative: ' + info.alt + '</div>';
   if (info.note) html += '<div class="tt-note">' + info.note + '</div>';
-  if (info.ex) html += '<pre>' + info.ex.replace(/\\n/g, '\n') + '</pre>';
+  if (info.ex) html += '<pre><button class="tt-copy" onclick="copyPre(this)" title="Copy"><svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg></button>' + info.ex.replace(/\\n/g, '\n') + '</pre>';
   tooltip.innerHTML = html;
   tooltip.style.display = 'block';
   const rect = tr.getBoundingClientRect();
@@ -628,9 +642,37 @@ document.addEventListener('mouseover', (e) => {
   if (left + tooltip.offsetWidth > window.innerWidth - 270) left = window.innerWidth - 270 - tooltip.offsetWidth - 10;
   tooltip.style.top = top + 'px';
   tooltip.style.left = left + 'px';
+  pinnedTooltip = tr;
+}
+function copyPre(btn) {
+  const pre = btn.closest('pre');
+  const text = pre.textContent.trim();
+  navigator.clipboard.writeText(text).then(() => {
+    btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="#6a9955"/></svg>';
+    setTimeout(() => { btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>'; }, 1500);
+  });
+}
+
+content.addEventListener('mousemove', (e) => {
+  const tr = e.target.closest('tr.hl-api');
+  if (tr && !pinnedTooltip) {
+    hoverHint.style.display = 'block';
+    hoverHint.style.left = (e.clientX + 12) + 'px';
+    hoverHint.style.top = (e.clientY - 8) + 'px';
+  } else {
+    hoverHint.style.display = 'none';
+  }
 });
-document.addEventListener('mouseout', (e) => {
-  if (!e.target.closest('tr.hl-api')) tooltip.style.display = 'none';
+content.addEventListener('mouseleave', () => { hoverHint.style.display = 'none'; });
+content.addEventListener('click', (e) => {
+  hoverHint.style.display = 'none';
+  const tr = e.target.closest('tr.hl-api');
+  if (!tr) { tooltip.style.display = 'none'; pinnedTooltip = null; return; }
+  if (pinnedTooltip === tr) {
+    tooltip.style.display = 'none'; pinnedTooltip = null;
+  } else {
+    showTooltipAt(tr);
+  }
 });
 
 function updateMinimap() {
@@ -646,7 +688,7 @@ function updateMinimap() {
     const mark = document.createElement('div');
     mark.className = 'mark';
     mark.style.top = (idx / allRows.length * mapH) + 'px';
-    mark.addEventListener('click', () => r.scrollIntoView({block:'center'}));
+    mark.addEventListener('click', () => scrollToRow(r));
     minimap.appendChild(mark);
   });
   updateViewport();
