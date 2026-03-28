@@ -1,0 +1,63 @@
+﻿# VBA Code Analysis Report
+# Source: folio.xlsm
+# Date: 2026-03-28 10:17:54
+
+## Modules (11)
+
+  ErrorHandler.cls (67 lines)
+  FieldEditor.cls (122 lines)
+  FolioData.bas (313 lines)
+  FolioLib.bas (1017 lines)
+  FolioMain.bas (175 lines)
+  FolioWorker.bas (975 lines)
+  frmFolio.frm (1670 lines)
+  frmSettings.frm (393 lines)
+  Sheet1.cls (8 lines)
+  SheetWatcher.cls (45 lines)
+  ThisWorkbook.cls (25 lines)
+
+  Total: 4810 lines
+
+## COM / CreateObject (12)
+
+  FolioLib.bas: Scripting.Dictionary
+  FolioLib.bas: Scripting.FileSystemObject
+  FolioMain.bas: Excel.Application
+  FolioMain.bas: Scripting.Dictionary
+  FolioWorker.bas: Scripting.FileSystemObject
+  frmFolio.frm: Scripting.FileSystemObject
+
+## COM / GetObject (1)
+
+  FolioMain.bas: winmgmts:\\.\root\cimv2
+
+## Shell / process execution (1)
+
+  FolioMain.bas: cmd /c
+
+## File I/O (Open/Kill/FileCopy) (5)
+
+  FolioLib.bas: Open For Binary
+  FolioMain.bas: Kill
+  FolioMain.bas: Open For Output
+  FolioWorker.bas: Open For Output
+
+## FileSystemObject (4)
+
+  FolioLib.bas: Scripting.FileSystemObject
+  FolioWorker.bas: Scripting.FileSystemObject
+  frmFolio.frm: Scripting.FileSystemObject
+
+## Process / WMI (1)
+
+  FolioMain.bas: Win32_Process
+
+## Encoding / obfuscation (2)
+
+  FolioLib.bas: ChrW$(165)
+  frmFolio.frm: ChrW$(31034)
+
+## Summary
+
+  26 potential migration issue(s) detected.
+  Review items above before deploying to restricted environments.

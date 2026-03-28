@@ -386,10 +386,44 @@ $patterns = [ordered]@{
         Pattern = '(?m)^[^'']*\b(SendKeys)\b'
         Extract = { param($m) $m.Groups[1].Value }
     }
+    'Network / HTTP' = @{
+        Pattern = '(?m)^[^'']*\b(MSXML2\.XMLHTTP|WinHttp\.WinHttpRequest|Inet|URLDownloadToFile|InternetOpen|HttpSendRequest|MSXML2\.ServerXMLHTTP)\b'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'PowerShell / WScript' = @{
+        Pattern = '(?m)^[^'']*\b(powershell|wscript|cscript|mshta)\b'
+        Extract = { param($m) $m.Groups[1].Value }
+        Flags = 'IgnoreCase'
+    }
+    'Process / WMI' = @{
+        Pattern = '(?m)^[^'']*\b(winmgmts|Win32_Process|WbemScripting|ExecQuery)\b'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'Clipboard' = @{
+        Pattern = '(?m)^[^'']*\b(MSForms\.DataObject|GetClipboardData|SetClipboardData|OpenClipboard)\b'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'Environment variables' = @{
+        Pattern = '(?m)^[^'']*\b(Environ\s*\$?\s*\()'
+        Extract = { param($m) "Environ" }
+    }
+    'Macro auto-execution' = @{
+        Pattern = '(?m)^\s*(Sub\s+(Auto_Open|Auto_Close|Workbook_Open|Workbook_BeforeClose|Document_Open|Document_Close)\b)'
+        Extract = { param($m) $m.Groups[2].Value }
+    }
+    'DLL loading' = @{
+        Pattern = '(?m)^[^'']*\b(LoadLibrary|GetProcAddress|FreeLibrary|CallByName)\b'
+        Extract = { param($m) $m.Groups[1].Value }
+    }
+    'Encoding / obfuscation' = @{
+        Pattern = '(?m)^[^'']*\b(Chr\s*\$?\s*\(\s*\d+\s*\)|ChrW?\s*\$?\s*\(\s*\d+\s*\))'
+        Extract = { param($m) $m.Groups[1].Value }
+        Aggregate = $true
+    }
     'Late-bound object calls' = @{
         Pattern = '(?m)^[^'']*\bSet\s+\w+\s*=\s*CreateObject\s*\(\s*"([^"]+)"'
         Extract = { param($m) $m.Groups[1].Value }
-        Skip = $true  # already covered by CreateObject
+        Skip = $true
     }
 }
 
@@ -413,9 +447,17 @@ foreach ($category in $patterns.Keys) {
         $issueCount += $findings.Count
         [void]$report.AppendLine("## $category ($($findings.Count))")
         [void]$report.AppendLine("")
-        $unique = $findings | Sort-Object -Unique
-        foreach ($item in $unique) {
-            [void]$report.AppendLine("  $item")
+        if ($patterns[$category].Aggregate) {
+            # Group by file, show count only
+            $grouped = $findings | Group-Object { $_ -replace ':.*', '' }
+            foreach ($g in $grouped) {
+                [void]$report.AppendLine("  $($g.Name): $($g.Count) occurrence(s)")
+            }
+        } else {
+            $unique = $findings | Sort-Object -Unique
+            foreach ($item in $unique) {
+                [void]$report.AppendLine("  $item")
+            }
         }
         [void]$report.AppendLine("")
     }
