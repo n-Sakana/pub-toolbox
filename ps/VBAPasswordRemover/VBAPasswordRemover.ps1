@@ -42,51 +42,46 @@ function Remove-PasswordXls([string]$path) {
     return $true
 }
 
-function Remove-PasswordOoxml([string]$path) {
+Write-Host "Processing: $FilePath"
+
+if ($ext -eq '.xls') {
+    $result = Remove-PasswordXls $FilePath
+} else {
+    # Load assemblies, then use types in a ScriptBlock created AFTER loading
+    # so PowerShell can resolve them at parse time of the block
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-    $updateMode = [Enum]::Parse([Type]::GetType('System.IO.Compression.ZipArchiveMode'), 'Update')
-    $openMethod = [Type]::GetType('System.IO.Compression.ZipFile').GetMethod(
-        'Open',
-        [Type[]]@([string], [Type]::GetType('System.IO.Compression.ZipArchiveMode'))
-    )
-    $zip = $openMethod.Invoke($null, @($path, $updateMode))
+    $result = & {
+        param($path)
+        $zip = [System.IO.Compression.ZipFile]::Open($path, [System.IO.Compression.ZipArchiveMode]::Update)
+        try {
+            $entry = $zip.Entries | Where-Object { $_.Name -eq 'vbaProject.bin' } | Select-Object -First 1
+            if (-not $entry) { return $false }
 
-    try {
-        $entry = $zip.Entries | Where-Object { $_.Name -eq 'vbaProject.bin' } | Select-Object -First 1
-        if (-not $entry) { return $false }
+            $stream = $entry.Open()
+            $ms = New-Object IO.MemoryStream
+            $stream.CopyTo($ms)
+            $stream.Close()
+            $data = $ms.ToArray()
+            $ms.Close()
 
-        $stream = $entry.Open()
-        $ms = New-Object IO.MemoryStream
-        $stream.CopyTo($ms)
-        $stream.Close()
-        $data = $ms.ToArray()
-        $ms.Close()
+            $pos = Find-DPB $data
+            if ($pos -eq -1) { return $false }
 
-        $pos = Find-DPB $data
-        if ($pos -eq -1) { return $false }
+            $data[$pos + 2] = 0x78
 
-        $data[$pos + 2] = 0x78
+            $stream = $entry.Open()
+            $stream.SetLength(0)
+            $stream.Write($data, 0, $data.Length)
+            $stream.Close()
 
-        $stream = $entry.Open()
-        $stream.SetLength(0)
-        $stream.Write($data, 0, $data.Length)
-        $stream.Close()
-
-        return $true
-    }
-    finally {
-        $zip.Dispose()
-    }
-}
-
-Write-Host "Processing: $FilePath"
-
-$result = if ($ext -eq '.xls') {
-    Remove-PasswordXls $FilePath
-} else {
-    Remove-PasswordOoxml $FilePath
+            return $true
+        }
+        finally {
+            $zip.Dispose()
+        }
+    } $FilePath
 }
 
 if ($result) {
