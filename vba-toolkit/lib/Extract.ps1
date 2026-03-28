@@ -357,3 +357,83 @@ foreach ($f in $sorted) {
 $combinedPath = Join-Path ([IO.Path]::GetDirectoryName($FilePath)) "${baseName}_combined.txt"
 [IO.File]::WriteAllText($combinedPath, $combined.ToString(), [System.Text.Encoding]::UTF8)
 Write-Host "Combined source: $combinedPath" -ForegroundColor Green
+
+# ============================================================================
+# HTML viewer with EDR detection highlights (blue)
+# ============================================================================
+
+# Build highlight patterns (all analysis patterns combined, minus Aggregate ones)
+$hlPatterns = [System.Collections.ArrayList]::new()
+foreach ($cat in $patterns.Keys) {
+    $p = $patterns[$cat]
+    if ($p.Aggregate) { continue }
+    [void]$hlPatterns.Add($p.Pattern)
+}
+# Also highlight API call sites
+$apiCallNames = [System.Collections.ArrayList]::new()
+foreach ($f in $allFiles) {
+    $c = [IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+    foreach ($m in [regex]::Matches($c, '(?m)^[^''\r\n]*\bDeclare\s+(PtrSafe\s+)?(Function|Sub)\s+(\w+)')) {
+        $n = $m.Groups[3].Value; if ($apiCallNames -notcontains $n) { [void]$apiCallNames.Add($n) }
+    }
+}
+# COM variable names
+$comVarNames = [System.Collections.ArrayList]::new()
+foreach ($b in $comBindings) {
+    if ($comVarNames -notcontains $b.VarName) { [void]$comVarNames.Add($b.VarName) }
+}
+
+$htmlModules = [ordered]@{}
+foreach ($f in $sorted) {
+    $modName = [IO.Path]::GetFileNameWithoutExtension($f.Name)
+    $modExt = $f.Extension.TrimStart('.')
+    $lines = ([IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)) -split "`r`n|`n"
+    # Strip Attribute lines
+    $cleanLines = [System.Collections.ArrayList]::new()
+    $lineMap = [System.Collections.ArrayList]::new()  # maps clean index -> original index
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -notmatch '^\s*Attribute\s+VB_') {
+            [void]$cleanLines.Add($lines[$i])
+            [void]$lineMap.Add($i)
+        }
+    }
+
+    $highlights = @{}
+    for ($i = 0; $i -lt $cleanLines.Count; $i++) {
+        $line = $cleanLines[$i]
+        if ($line -match '^\s*''') { continue }
+        $hit = $false
+        foreach ($pat in $hlPatterns) {
+            if ($line -match $pat) { $hit = $true; break }
+        }
+        if (-not $hit) {
+            foreach ($apiName in $apiCallNames) {
+                if ($line -match "\b$([regex]::Escape($apiName))\b" -and $line -notmatch '(?i)\bDeclare\s') {
+                    $hit = $true; break
+                }
+            }
+        }
+        if (-not $hit) {
+            foreach ($vn in $comVarNames) {
+                if ($line -match "\b$([regex]::Escape($vn))\.") { $hit = $true; break }
+            }
+        }
+        if ($hit) { $highlights[$i] = $true }
+    }
+
+    $htmlModules[$modName] = @{ Ext = $modExt; Lines = $cleanLines; Highlights = $highlights }
+}
+
+$htmlPath = Join-Path ([IO.Path]::GetDirectoryName($FilePath)) "${baseName}_extract.html"
+New-HtmlCodeView `
+    -title "VBA Extract: $([IO.Path]::GetFileName($FilePath))" `
+    -subtitle "$($allFiles.Count) modules, $totalLines lines, $issueCount issue(s)" `
+    -moduleData $htmlModules `
+    -highlightClass 'hl-edr' `
+    -highlightColor '#1b2e4a' `
+    -highlightText '#a0c4f0' `
+    -markerColor '#4a9eff' `
+    -outputPath $htmlPath
+
+Start-Process $htmlPath
+Write-Host "HTML viewer: $htmlPath" -ForegroundColor Green

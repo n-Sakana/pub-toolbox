@@ -384,7 +384,155 @@ function Get-VbaModuleCode($ole2, [string]$moduleName) {
     return $null
 }
 
+# ============================================================================
+# HTML Code Viewer (shared by Extract, Sanitize)
+# ============================================================================
+
+# $moduleData: ordered hashtable of name -> @{ Ext; Lines = string[]; Highlights = @{ lineIndex -> cssClass } }
+# $highlightLabel: e.g. "EDR Detection" or "Sanitized"
+function New-HtmlCodeView {
+    param(
+        [string]$title,
+        [string]$subtitle,
+        [System.Collections.Specialized.OrderedDictionary]$moduleData,
+        [string]$highlightClass,   # CSS class for highlighted lines (e.g. 'hl-edr', 'hl-sanitized')
+        [string]$highlightColor,   # CSS color (e.g. '#1b3a5c' for blue, '#4b3a00' for yellow)
+        [string]$highlightText,    # CSS text color
+        [string]$markerColor,      # minimap marker color
+        [string]$outputPath
+    )
+
+    $he = { param($s) [System.Net.WebUtility]::HtmlEncode($s) }
+
+    $html = [System.Text.StringBuilder]::new()
+    [void]$html.Append(@"
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>$(& $he $title)</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: Consolas, 'Courier New', monospace; font-size: 13px; background: #1e1e1e; color: #d4d4d4; }
+.header { background: #252526; padding: 10px 20px; border-bottom: 1px solid #3c3c3c; }
+.header h1 { font-size: 15px; font-weight: normal; color: #cccccc; }
+.header .sub { margin-top: 4px; font-size: 12px; color: #888; }
+.main { display: flex; height: calc(100vh - 52px); }
+.sidebar { width: 200px; min-width: 200px; background: #252526; border-right: 1px solid #3c3c3c; overflow-y: auto; padding: 8px 0; }
+.sidebar .item { padding: 5px 16px; cursor: pointer; color: #888; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar .item:hover { color: #d4d4d4; background: #2a2d2e; }
+.sidebar .item.active { color: #ffffff; background: #37373d; border-left: 2px solid #0078d4; }
+.sidebar .item.has-hl { color: $markerColor; }
+.sidebar .item.no-hl { color: #606060; }
+.content { flex: 1; overflow: auto; position: relative; }
+.module { display: none; }
+.module.active { display: block; }
+.code-table { width: 100%; border-collapse: collapse; }
+.code-table td { padding: 0 8px; line-height: 20px; vertical-align: top; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.code-table .ln { width: 50px; min-width: 50px; text-align: right; color: #606060; padding-right: 12px; user-select: none; border-right: 1px solid #3c3c3c; }
+.code-table .code { color: #d4d4d4; }
+tr.$highlightClass td.code { background: $highlightColor; color: $highlightText; }
+tr.$highlightClass td.ln { color: #cccccc; }
+.minimap { position: fixed; right: 0; top: 52px; width: 14px; bottom: 0; background: #1e1e1e; border-left: 1px solid #3c3c3c; z-index: 20; cursor: pointer; }
+.minimap .mark { position: absolute; right: 2px; width: 10px; height: 3px; border-radius: 1px; background: $markerColor; }
+.minimap .viewport { position: absolute; right: 0; width: 14px; background: rgba(255,255,255,0.25); border-radius: 2px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>$(& $he $title)</h1>
+  <div class="sub">$(& $he $subtitle)</div>
+</div>
+<div class="main">
+<div class="sidebar" id="sidebar">
+"@)
+
+    $tabIdx = 0; $firstHlIdx = -1
+    foreach ($modName in $moduleData.Keys) {
+        $md = $moduleData[$modName]
+        $hlCount = 0
+        if ($md.Highlights) { $hlCount = $md.Highlights.Count }
+        $cls = if ($hlCount -gt 0) { 'has-hl' } else { 'no-hl' }
+        if ($firstHlIdx -eq -1 -and $hlCount -gt 0) { $firstHlIdx = $tabIdx }
+        $label = "$modName.$($md.Ext)"
+        if ($hlCount -gt 0) { $label += " ($hlCount)" }
+        [void]$html.Append("<div class=`"item $cls`" onclick=`"showTab($tabIdx)`" id=`"tab$tabIdx`">$(& $he $label)</div>")
+        $tabIdx++
+    }
+    if ($firstHlIdx -eq -1) { $firstHlIdx = 0 }
+
+    [void]$html.Append("</div><div class=`"content`">")
+
+    $tabIdx = 0
+    foreach ($modName in $moduleData.Keys) {
+        $md = $moduleData[$modName]
+        [void]$html.Append("<div class=`"module`" id=`"mod$tabIdx`"><table class=`"code-table`">")
+        for ($i = 0; $i -lt $md.Lines.Count; $i++) {
+            $trClass = ''
+            if ($md.Highlights -and $md.Highlights.ContainsKey($i)) { $trClass = $highlightClass }
+            $ln = $i + 1
+            $code = & $he $md.Lines[$i]
+            [void]$html.Append("<tr class=`"$trClass`"><td class=`"ln`">$ln</td><td class=`"code`">$code</td></tr>")
+        }
+        [void]$html.Append("</table></div>")
+        $tabIdx++
+    }
+
+    [void]$html.Append(@"
+<div class="minimap" id="minimap"><div class="viewport" id="viewport"></div></div>
+</div></div>
+<script>
+const content = document.querySelector('.content');
+const minimap = document.getElementById('minimap');
+const viewport = document.getElementById('viewport');
+function showTab(idx) {
+  document.querySelectorAll('.module').forEach(m => m.classList.remove('active'));
+  document.querySelectorAll('.item').forEach(t => t.classList.remove('active'));
+  document.getElementById('mod' + idx).classList.add('active');
+  document.getElementById('tab' + idx).classList.add('active');
+  updateMinimap();
+}
+function updateMinimap() {
+  minimap.querySelectorAll('.mark').forEach(m => m.remove());
+  const mod = document.querySelector('.module.active');
+  if (!mod) return;
+  const rows = mod.querySelectorAll('tr.$highlightClass');
+  const allRows = mod.querySelectorAll('tr');
+  if (allRows.length === 0) return;
+  const mapH = minimap.clientHeight;
+  rows.forEach(r => {
+    const idx = Array.from(allRows).indexOf(r);
+    const mark = document.createElement('div');
+    mark.className = 'mark';
+    mark.style.top = (idx / allRows.length * mapH) + 'px';
+    mark.addEventListener('click', () => r.scrollIntoView({block:'center'}));
+    minimap.appendChild(mark);
+  });
+  updateViewport();
+}
+function updateViewport() {
+  const sh = content.scrollHeight, ch = content.clientHeight, st = content.scrollTop;
+  const mapH = minimap.clientHeight;
+  if (sh <= ch) { viewport.style.display = 'none'; return; }
+  viewport.style.display = '';
+  viewport.style.top = (st / sh * mapH) + 'px';
+  viewport.style.height = (ch / sh * mapH) + 'px';
+}
+content.addEventListener('scroll', updateViewport);
+minimap.addEventListener('click', (e) => {
+  if (e.target.classList.contains('mark')) return;
+  content.scrollTop = e.offsetY / minimap.clientHeight * content.scrollHeight - content.clientHeight / 2;
+});
+showTab($firstHlIdx);
+</script>
+</body></html>
+"@)
+
+    [IO.File]::WriteAllText($outputPath, $html.ToString(), [System.Text.Encoding]::UTF8)
+}
+
 Export-ModuleMember -Function Read-Ole2, Read-Ole2Stream, Write-Ole2Stream,
     Decompress-VBA, Compress-VBA,
     Get-VbaProjectBytes, Save-VbaProjectBytes,
-    Get-VbaModuleList, Get-VbaModuleCode
+    Get-VbaModuleList, Get-VbaModuleCode,
+    New-HtmlCodeView

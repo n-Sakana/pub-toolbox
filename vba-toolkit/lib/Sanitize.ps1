@@ -124,3 +124,46 @@ if ($declaredNames.Count -gt 0) {
 $reportPath = [IO.Path]::ChangeExtension($FilePath, $null).TrimEnd('.') + "_sanitized.txt"
 [IO.File]::WriteAllText($reportPath, $report.ToString(), [System.Text.Encoding]::UTF8)
 Write-Host "Report: $reportPath"
+
+# ============================================================================
+# HTML viewer with sanitized line highlights (yellow)
+# ============================================================================
+
+# Re-read the sanitized code for HTML
+$htmlModules = [ordered]@{}
+$proj2 = Get-VbaProjectBytes $FilePath
+if ($proj2.Bytes) {
+    $ole2_2 = Read-Ole2 $proj2.Bytes
+    $modules2 = Get-VbaModuleList $ole2_2
+    foreach ($mod in $modules2) {
+        $result = Get-VbaModuleCode $ole2_2 $mod.Name
+        if (-not $result) { continue }
+        $lines = ($result.Code -split "`r`n|`n") | Where-Object { $_ -notmatch '^\s*Attribute\s+VB_' }
+        $lineArr = [System.Collections.ArrayList]::new()
+        $highlights = @{}
+        $idx = 0
+        foreach ($line in $lines) {
+            [void]$lineArr.Add($line)
+            if ($line -match [regex]::Escape($commentPrefix)) { $highlights[$idx] = $true }
+            $idx++
+        }
+        $htmlModules[$mod.Name] = @{ Ext = $mod.Ext; Lines = $lineArr; Highlights = $highlights }
+    }
+}
+
+if ($htmlModules.Count -gt 0) {
+    $baseName = [IO.Path]::GetFileNameWithoutExtension($FilePath)
+    $htmlPath = [IO.Path]::ChangeExtension($FilePath, $null).TrimEnd('.') + "_sanitized.html"
+    New-HtmlCodeView `
+        -title "VBA Sanitize: $([IO.Path]::GetFileName($FilePath))" `
+        -subtitle "$totalChanges line(s) commented out" `
+        -moduleData $htmlModules `
+        -highlightClass 'hl-sanitized' `
+        -highlightColor '#4b3a00' `
+        -highlightText '#f0d870' `
+        -markerColor '#e8ab53' `
+        -outputPath $htmlPath
+
+    Start-Process $htmlPath
+    Write-Host "HTML viewer: $htmlPath" -ForegroundColor Green
+}
