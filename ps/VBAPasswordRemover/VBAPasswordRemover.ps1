@@ -3,6 +3,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression
 
 if (-not (Test-Path $FilePath)) {
     Write-Host "Error: file not found: $FilePath" -ForegroundColor Red
@@ -44,8 +45,6 @@ function Remove-PasswordXls([string]$path) {
 }
 
 function Remove-PasswordOoxml([string]$path) {
-    Add-Type -AssemblyName System.IO.Compression
-
     # Open ZIP in-place (Update mode) - no extract/re-create
     $zip = [IO.Compression.ZipFile]::Open($path, [IO.Compression.ZipArchiveMode]::Update)
     try {
