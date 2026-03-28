@@ -7,5 +7,9 @@ if "%~1"=="" (
     pause
     exit /b 1
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0lib\Sanitize.ps1" "%~1"
+for %%F in (%*) do (
+    echo.
+    echo ========================================
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0lib\Sanitize.ps1" "%%~F"
+)
 pause
