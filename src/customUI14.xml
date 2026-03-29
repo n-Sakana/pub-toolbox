@@ -1,0 +1,21 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui"
+          xmlns:pub="http://n-sakana/pub">
+  <ribbon>
+    <tabs>
+      <tab idQ="pub:MainTab" label="vba-tools" insertAfterMso="TabHome">
+        <group id="grpVbaToolbox" label="vba-toolbox">
+          <button id="btnCreateDraftSheet"
+                  label="Create Draft Sheet"
+                  size="large"
+                  imageMso="ServerProperties"
+                  onAction="Ribbon_CreateDraftSheet" />
+          <button id="btnRunDrafts"
+                  label="Run Drafts"
+                  size="large"
+                  imageMso="TablePropertiesDialog"
+                  onAction="Ribbon_RunDrafts" />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
