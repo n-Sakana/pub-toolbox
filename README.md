@@ -42,3 +42,15 @@ sample/
 6. `from` is optional. Leave it blank to use the default Outlook account.
 7. Use `;` for multiple mail addresses and attachment paths.
 8. Click `Run Drafts` on the same ribbon tab.
+
+## MOJ ISA FAQ Excel Export
+
+The Python script `scripts/moj_isa_faq_to_excel.py` scrapes the eight FAQ pages linked from the Immigration Services Agency Q&A index and exports Q&A rows to an Excel workbook.
+
+```bash
+python -m pip install -r scripts/requirements-moj-isa-faq.txt
+python scripts/moj_isa_faq_to_excel.py --output moj_isa_faq.xlsx
+python scripts/test_moj_isa_faq_to_excel_e2e.py
+```
+
+The generated `.xlsx` file is ignored by git.
